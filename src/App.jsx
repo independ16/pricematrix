@@ -287,7 +287,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   display:flex;align-items:center;gap:16px;flex-shrink:0;z-index:100;
   box-shadow:var(--shadow);
 }
-.logo{
+.logo-img{mix-blend-mode:multiply;border-radius:4px}
+.dark .logo-img{display:none!important}
+.dark .logo-img + .logo{display:flex!important}
+
   width:30px;height:30px;border-radius:6px;flex-shrink:0;
   background:var(--brand);
   display:flex;align-items:center;justify-content:center;
@@ -1191,6 +1194,7 @@ function AuthGate({ onLogin }) {
         <img
           src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
           alt="Patio Products"
+          className="logo-img"
           style={{height:48,width:"auto",objectFit:"contain"}}
           onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
         />
@@ -1342,6 +1346,7 @@ export default function App() {
         <img
           src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
           alt="Patio Products"
+          className="logo-img"
           style={{height:32,width:"auto",objectFit:"contain",flexShrink:0}}
           onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
         />
