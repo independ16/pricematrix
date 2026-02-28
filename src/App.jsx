@@ -594,10 +594,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .auth-note{font-size:10px;font-family:var(--fm);color:var(--t3);text-align:center;line-height:1.5}
 
 /* ── SCROLLBARS ── */
-::-webkit-scrollbar{width:5px;height:5px}
-::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--b2);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--b3)}
+::-webkit-scrollbar{width:7px;height:7px}
+::-webkit-scrollbar-track{background:var(--s2)}
+::-webkit-scrollbar-thumb{background:var(--b3);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--t3)}
 
 .fade{animation:fi .15s ease}
 @keyframes fi{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
@@ -908,27 +908,32 @@ function SheetView({ category, visibleTiers, allData }) {
 
   const data = useMemo(()=>getTierFlat(allData, activeTier), [allData, activeTier]);
 
+  // Search is global — ignore category filter when searching
+  const effectiveCat = search ? "All" : category;
+
   const rows = useMemo(()=>{
     let entries = Object.entries(data);
-    if (category !== "All") entries = entries.filter(([,v])=>v.category===category);
+    if (effectiveCat !== "All") entries = entries.filter(([,v])=>v.category===effectiveCat);
     if (search) { const q=search.toLowerCase(); entries=entries.filter(([sku,v])=>v.parent_name.toLowerCase().includes(q)||sku.toLowerCase().includes(q)||v.parent_sku.toLowerCase().includes(q)); }
     return entries.sort((a,b)=>{
       if(a[1].category!==b[1].category) return a[1].category.localeCompare(b[1].category);
       return a[1].parent_name.localeCompare(b[1].parent_name);
     });
-  },[data, category, search]);
+  },[data, effectiveCat, search]);
 
   const color = TIER_COLORS[activeTier];
   let lastCat = null;
 
-  // Derive qty break columns dynamically from the actual data for this tier, suppress break=1
+  // Derive qty break columns from the FILTERED rows only (not all data), suppress break=1
   const sheetBreaks = useMemo(() => {
     const breaks = new Set();
-    Object.values(data).forEach(v => {
-      Object.keys(v).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => breaks.add(b));
+    rows.forEach(([,v]) => {
+      Object.keys(v).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
+        if (v[b] != null) breaks.add(b);
+      });
     });
     return [...breaks].sort((a,b) => a - b);
-  }, [data]);
+  }, [rows]);
 
   return (
     <div className="sheet">
@@ -957,8 +962,8 @@ function SheetView({ category, visibleTiers, allData }) {
         <table className="st">
           <thead>
             <tr>
-              <th style={{minWidth:220}}>Product / Variant</th>
-              <th style={{minWidth:90}}>SKU</th>
+              <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
+              <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
               {sheetBreaks.map(q=>(
                 <th key={q} className="r" style={{color: q===0 ? color : undefined}}>
                   {q===0?"Price":`${q}+`}
@@ -973,15 +978,15 @@ function SheetView({ category, visibleTiers, allData }) {
               return [
                 showCat && (
                   <tr key={`ch-${v.category}`} className="cat-hdr">
-                    <td colSpan={2+sheetBreaks.length}>{v.category}</td>
+                    <td colSpan={2+sheetBreaks.length} style={{position:"sticky",left:0}}>{v.category}</td>
                   </tr>
                 ),
                 <tr key={sku}>
-                  <td>
+                  <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
                     <div className="s-name">{v.parent_name}</div>
                     {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
                   </td>
-                  <td><span className="s-sku">{sku}</span></td>
+                  <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
                   {sheetBreaks.map(q=>{
                     const p = v[q];
                     return (
