@@ -128,7 +128,9 @@ function getProducts(data) {
   data.forEach(r => {
     if (!map.has(r.parent_id)) map.set(r.parent_id, {
       parent_id: r.parent_id, parent_sku: r.parent_sku,
-      parent_name: r.parent_name, category: r.category, image_url: r.image_url,
+      parent_name: decodeEntities(r.parent_name),
+      category: decodeEntities(r.category),
+      image_url: r.image_url,
     });
   });
   return [...map.values()];
@@ -159,8 +161,10 @@ function getTierFlat(data, tier) {
   const m = {};
   data.filter(r => r.tier === tier).forEach(r => {
     m[r.child_sku] ??= {
-      parent_sku: r.parent_sku, parent_name: r.parent_name,
-      variant_name: r.variant_name, category: r.category,
+      parent_sku: r.parent_sku,
+      parent_name: decodeEntities(r.parent_name),
+      variant_name: decodeEntities(r.variant_name),
+      category: decodeEntities(r.category),
     };
     m[r.child_sku][r.qty_break] = r.price;
   });
@@ -192,8 +196,13 @@ function resolveCustomerPrice(data, customer, childSku, qty) {
   return { price: tierRow?.price ?? null, isSpecial: false };
 }
 
+// Decode HTML entities in strings from WooCommerce (e.g. &amp; → &)
+function decodeEntities(str) {
+  if (!str) return str;
+  return str.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#039;/g,"'");
+}
+
 function downloadCSV(filename, headers, rows) {
-  const csv = [headers.join(","), ...rows.map(r => r.map(v => typeof v === "string" && v.includes(",") ? `"${v}"` : v ?? "").join(","))].join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
   a.download = filename; a.click();
@@ -619,22 +628,60 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 
 // ─── PCT BADGE ────────────────────────────────────────────────────────────────
 function PctBadge({ price, wsPrice }) {
-  if (wsPrice == null) return null;
+  if (wsPrice == null || wsPrice === 0) return null;
   const p = ((price - wsPrice) / wsPrice) * 100;
+  if (!isFinite(p) || isNaN(p)) return null;
   if (Math.abs(p) < 0.05) return <span className="pct pct-ws">WS</span>;
   return <span className={`pct ${p > 0 ? "pct-up" : "pct-down"}`}>{fmtP(p)}</span>;
 }
 
 // ─── DETAIL PANEL ─────────────────────────────────────────────────────────────
-function DetailPanel({ product, visibleTiers, onClose, allData }) {
+function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku }) {
   const [selTier, setSelTier] = useState("All");
   const [calcVar,  setCalcVar]  = useState(null);
   const [calcQty,  setCalcQty]  = useState("");
+  const [filterColor, setFilterColor] = useState("All");
+  const [filterSize,  setFilterSize]  = useState("All");
 
   const variants = useMemo(() => getVariants(allData, product.parent_id), [allData, product.parent_id]);
   const matrix   = useMemo(() => buildMatrix(allData, product.parent_id), [allData, product.parent_id]);
   const firstSku = variants[0]?.child_sku;
   const cvSku    = calcVar || firstSku;
+
+  // Detect if variants follow "Color / Size" pattern
+  const isSlashVariants = useMemo(() =>
+    variants.length > 1 && variants.every(v => v.variant_name.includes(" / ")),
+  [variants]);
+
+  const colorOptions = useMemo(() => {
+    if (!isSlashVariants) return [];
+    return ["All", ...new Set(variants.map(v => v.variant_name.split(" / ")[0].trim()))];
+  }, [isSlashVariants, variants]);
+
+  const sizeOptions = useMemo(() => {
+    if (!isSlashVariants) return [];
+    return ["All", ...new Set(variants.map(v => v.variant_name.split(" / ")[1].trim()))];
+  }, [isSlashVariants, variants]);
+
+  // When a focusChildSku is provided (from SKU search), pre-set the size filter
+  useEffect(() => {
+    if (!focusChildSku || !isSlashVariants) return;
+    const match = variants.find(v => v.child_sku === focusChildSku);
+    if (match) {
+      const [color, size] = match.variant_name.split(" / ").map(s => s.trim());
+      setFilterSize(size);
+      setFilterColor("All");
+    }
+  }, [focusChildSku, isSlashVariants, variants]);
+
+  const visibleVariants = useMemo(() => {
+    if (!isSlashVariants) return variants;
+    return variants.filter(v => {
+      const [color, size] = v.variant_name.split(" / ").map(s => s.trim());
+      return (filterColor === "All" || color === filterColor) &&
+             (filterSize  === "All" || size  === filterSize);
+    });
+  }, [variants, isSlashVariants, filterColor, filterSize]);
 
   // Qty calc — skips break=1 (duplicate sentinel), uses break=0 as floor
   const calcTier = selTier === "All" ? "Wholesale" : selTier;
@@ -647,7 +694,8 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
   }
   const qNum  = parseInt(calcQty) || 0;
   const uPrice = qNum > 0 ? resolveCalcPrice(qNum) : null;
-  const tPrice = uPrice != null && qNum > 0 ? uPrice * qNum : null;
+  const uPriceRounded = uPrice != null ? Math.round(uPrice * 100) / 100 : null;
+  const tPrice = uPriceRounded != null && qNum > 0 ? Math.round(uPriceRounded * qNum * 100) / 100 : null;
 
   const tiersToShow = selTier === "All" ? visibleTiers : (visibleTiers.includes(selTier) ? [selTier] : visibleTiers);
 
@@ -700,7 +748,21 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
         </span>
       </div>
 
-      {/* Qty Calculator */}
+      {/* Variant dimension filters — only for color/size products */}
+      {isSlashVariants && (
+        <div className="det-acts" style={{background:"var(--s1)",gap:6}}>
+          <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Filter</span>
+          <select className="calc-var" value={filterColor} onChange={e=>setFilterColor(e.target.value)}>
+            {colorOptions.map(c=><option key={c} value={c}>{c==="All"?"All Colors":c}</option>)}
+          </select>
+          <select className="calc-var" value={filterSize} onChange={e=>setFilterSize(e.target.value)}>
+            {sizeOptions.map(s=><option key={s} value={s}>{s==="All"?"All Sizes":s}</option>)}
+          </select>
+          <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",marginLeft:"auto"}}>
+            {visibleVariants.length} of {variants.length} variants
+          </span>
+        </div>
+      )}
       <div className="calc">
         <span className="calc-lbl">QTY CALC</span>
         <select className="calc-var" value={cvSku} onChange={e=>setCalcVar(e.target.value)}>
@@ -712,7 +774,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
           <>
             <span className="calc-arrow">→</span>
             <span className="calc-total">{fmt(tPrice)}</span>
-            <span className="calc-unit">{fmt(uPrice)} × {qNum}</span>
+            <span className="calc-unit">{fmt(uPriceRounded)} × {qNum}</span>
           </>
         ) : calcQty ? (
           <span className="calc-unit" style={{color:"var(--t3)"}}>enter qty</span>
@@ -733,7 +795,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
       <div className="det-body">
         {selTier !== "All" ? (
           /* Single tier: variants × qty breaks */
-          variants.map(v => {
+          visibleVariants.map(v => {
             const breaks = qtyBreaksSingleTier(v.child_sku, selTier);
             return (
               <div key={v.child_sku} className="ptw" style={{marginBottom:12}}>
@@ -776,7 +838,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
           })
         ) : (
           /* All tiers: one section per variant, dynamic breaks */
-          variants.map(v => {
+          visibleVariants.map(v => {
             const breaks = qtyBreaksAllTiers(v.child_sku);
             return (
               <div key={v.child_sku} className="msec">
@@ -1095,6 +1157,7 @@ export default function App() {
   const [category,    setCategory]   = useState("All");
   const [sortBy,      setSortBy]     = useState("name");
   const [selectedProd,setSelectedProd] = useState(null);
+  const [focusChildSku,setFocusChildSku] = useState(null);
 
   // ── LIVE DATA ──
   const [allData,    setAllData]    = useState([]);
@@ -1124,17 +1187,49 @@ export default function App() {
     return Object.keys(m).sort();
   },[allProducts]);
 
+  // Build map of parent_id -> child SKUs for variant SKU search
+  const childSkuMap = useMemo(()=>{
+    const m = {};
+    allData.forEach(r => {
+      if (!m[r.parent_id]) m[r.parent_id] = new Set();
+      m[r.parent_id].add(r.child_sku);
+    });
+    return m;
+  }, [allData]);
+
   const filtered = useMemo(()=>{
     let list = allProducts;
-    if(category!=="All") list=list.filter(p=>p.category===category);
-    if(search){const q=search.toLowerCase();list=list.filter(p=>p.parent_name.toLowerCase().includes(q)||p.parent_sku.toLowerCase().includes(q));}
+    // Search is global — resets category filter
+    const effectiveCat = search ? "All" : category;
+    if(effectiveCat!=="All") list=list.filter(p=>p.category===effectiveCat);
+    if(search){
+      const q=search.toLowerCase();
+      list=list.filter(p=>
+        p.parent_name.toLowerCase().includes(q) ||
+        p.parent_sku.toLowerCase().includes(q) ||
+        [...(childSkuMap[p.parent_id]||[])].some(sku=>sku.toLowerCase().includes(q))
+      );
+    }
     return [...list].sort((a,b)=>{
       if(sortBy==="name") return a.parent_name.localeCompare(b.parent_name);
       if(sortBy==="sku")  return a.parent_sku.localeCompare(b.parent_sku);
       if(sortBy==="cat")  return a.category.localeCompare(b.category);
       return 0;
     });
-  },[allProducts,category,search,sortBy]);
+  },[allProducts,childSkuMap,category,search,sortBy]);
+
+  // When search yields exactly one result and matches a child SKU, auto-select it
+  useEffect(()=>{
+    if(search && filtered.length === 1) {
+      const q = search.toLowerCase();
+      setSelectedProd(filtered[0]);
+      // Find the matching child SKU
+      const matchingSku = [...(childSkuMap[filtered[0].parent_id]||[])].find(sku=>sku.toLowerCase().includes(q));
+      setFocusChildSku(matchingSku || null);
+    } else if(!search) {
+      setFocusChildSku(null);
+    }
+  },[search, filtered]);
 
   function getWsPrice(pid) {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
@@ -1216,11 +1311,11 @@ export default function App() {
             <div className="sb-sec">
               <div className="sb-lbl">Category</div>
               <div className="cat-list">
-                <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>setCategory("All")}>
+                <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>{ setCategory("All"); setSelectedProd(null); }}>
                   All <span className="cat-cnt">{allProducts.length}</span>
                 </button>
                 {categories.map(cat=>(
-                  <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>setCategory(cat)}>
+                  <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>{ setCategory(cat); setSelectedProd(null); }}>
                     {cat} <span className="cat-cnt">{allProducts.filter(p=>p.category===cat).length}</span>
                   </button>
                 ))}
@@ -1297,7 +1392,7 @@ export default function App() {
               </div>
 
               {selectedProd ? (
-                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>setSelectedProd(null)} allData={allData}/>
+                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>{setSelectedProd(null);setFocusChildSku(null);}} allData={allData} focusChildSku={focusChildSku}/>
               ) : (
                 <div className="detail" style={{display:"flex"}}>
                   <div className="nosel">
