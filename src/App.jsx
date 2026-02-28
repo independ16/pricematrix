@@ -145,13 +145,13 @@ function getVariants(data, parentId) {
   return [...map.values()];
 }
 
-// { [childSku]: { [tier]: { [qty]: price } } }
+// { [childId]: { [tier]: { [qty]: price } } }
 function buildMatrix(data, parentId) {
   const m = {};
   data.filter(r => r.parent_id === parentId).forEach(r => {
-    m[r.child_sku] ??= {};
-    m[r.child_sku][r.tier] ??= {};
-    m[r.child_sku][r.tier][r.qty_break] = r.price;
+    m[r.child_id] ??= {};
+    m[r.child_id][r.tier] ??= {};
+    m[r.child_id][r.tier][r.qty_break] = r.price;
   });
   return m;
 }
@@ -645,7 +645,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
 
   const variants = useMemo(() => getVariants(allData, product.parent_id), [allData, product.parent_id]);
   const matrix   = useMemo(() => buildMatrix(allData, product.parent_id), [allData, product.parent_id]);
-  const firstSku = variants[0]?.child_sku;
+  const firstSku = variants[0]?.child_id;
   const cvSku    = calcVar || firstSku;
 
   // Detect if variants follow "Color / Size" pattern
@@ -683,6 +683,11 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
     });
   }, [variants, isSlashVariants, filterColor, filterSize]);
 
+  // Auto-scroll ref for focused variant (from SKU search)
+  const focusRef = useCallback(node => {
+    if (node) node.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [focusChildSku]);
+
   // Qty calc — skips break=1 (duplicate sentinel), uses break=0 as floor
   const calcTier = selTier === "All" ? "Wholesale" : selTier;
   function resolveCalcPrice(qty) {
@@ -695,21 +700,21 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
   const qNum  = parseInt(calcQty) || 0;
   const uPrice = qNum > 0 ? resolveCalcPrice(qNum) : null;
   const uPriceRounded = uPrice != null ? Math.round(uPrice * 100) / 100 : null;
-  const tPrice = uPriceRounded != null && qNum > 0 ? Math.round(uPriceRounded * qNum * 100) / 100 : null;
+  const tPrice = uPrice != null && qNum > 0 ? Math.round(uPrice * qNum * 100) / 100 : null;
 
   const tiersToShow = selTier === "All" ? visibleTiers : (visibleTiers.includes(selTier) ? [selTier] : visibleTiers);
 
   // Dynamic qty breaks derived from real data, suppressing break=1
-  function qtyBreaksAllTiers(childSku) {
+  function qtyBreaksAllTiers(childId) {
     const breaks = new Set();
     tiersToShow.forEach(tier => {
-      Object.keys(matrix[childSku]?.[tier] || {}).map(Number).filter(b => b !== 1).forEach(b => breaks.add(b));
+      Object.keys(matrix[childId]?.[tier] || {}).map(Number).filter(b => b !== 1).forEach(b => breaks.add(b));
     });
     return [...breaks].sort((a,b) => a - b);
   }
 
-  function qtyBreaksSingleTier(childSku, tier) {
-    return Object.keys(matrix[childSku]?.[tier] || {}).map(Number).filter(b => b !== 1).sort((a,b) => a - b);
+  function qtyBreaksSingleTier(childId, tier) {
+    return Object.keys(matrix[childId]?.[tier] || {}).map(Number).filter(b => b !== 1).sort((a,b) => a - b);
   }
   function handleCSV() {
     const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
@@ -766,7 +771,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
       <div className="calc">
         <span className="calc-lbl">QTY CALC</span>
         <select className="calc-var" value={cvSku} onChange={e=>setCalcVar(e.target.value)}>
-          {variants.map(v=><option key={v.child_sku} value={v.child_sku}>{v.variant_name} · {v.child_sku}</option>)}
+          {variants.map(v=><option key={v.child_id} value={v.child_id}>{v.variant_name} · {v.child_sku}</option>)}
         </select>
         <span className="calc-lbl">×</span>
         <input className="calc-qty" type="number" min="1" placeholder="qty" value={calcQty} onChange={e=>setCalcQty(e.target.value)}/>
@@ -796,9 +801,10 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
         {selTier !== "All" ? (
           /* Single tier: variants × qty breaks */
           visibleVariants.map(v => {
-            const breaks = qtyBreaksSingleTier(v.child_sku, selTier);
+            const breaks = qtyBreaksSingleTier(v.child_id, selTier);
+            const isFocus = focusChildSku && v.child_sku === focusChildSku;
             return (
-              <div key={v.child_sku} className="ptw" style={{marginBottom:12}}>
+              <div key={v.child_id} ref={isFocus ? focusRef : null} className="ptw" style={{marginBottom:12,outline: isFocus?"2px solid var(--brand)":"none",borderRadius:7}}>
                 <table className="pt">
                   <thead>
                     <tr>
@@ -813,8 +819,8 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
                         <span className="skubadge">{v.child_sku}</span>
                       </td>
                       {breaks.map(q=>{
-                        const price   = matrix[v.child_sku]?.[selTier]?.[q];
-                        const wsPrice = matrix[v.child_sku]?.Wholesale?.[q];
+                        const price   = matrix[v.child_id]?.[selTier]?.[q];
+                        const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
                         const isWs    = selTier === "Wholesale";
                         const isBase  = q === 0;
                         const priceClass = isWs ? "pc-ws" :
@@ -839,9 +845,10 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
         ) : (
           /* All tiers: one section per variant, dynamic breaks */
           visibleVariants.map(v => {
-            const breaks = qtyBreaksAllTiers(v.child_sku);
+            const breaks = qtyBreaksAllTiers(v.child_id);
+            const isFocus = focusChildSku && v.child_sku === focusChildSku;
             return (
-              <div key={v.child_sku} className="msec">
+              <div key={v.child_id} ref={isFocus ? focusRef : null} className="msec" style={{outline: isFocus?"2px solid var(--brand)":"none",borderRadius:7,padding: isFocus?4:0}}>
                 <div className="msec-hdr">
                   {v.variant_name} <span className="vbadge">{v.child_sku}</span>
                 </div>
@@ -865,8 +872,8 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
                               </span>
                             </td>
                             {breaks.map(q=>{
-                              const price   = matrix[v.child_sku]?.[tier]?.[q];
-                              const wsPrice = matrix[v.child_sku]?.Wholesale?.[q];
+                              const price   = matrix[v.child_id]?.[tier]?.[q];
+                              const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
                               return (
                                 <td key={q} className="r">
                                   {price != null ? (
