@@ -171,6 +171,30 @@ function getTierFlat(data, tier) {
   return m;
 }
 
+// Build Sage 50 export rows — one row per unique parent_sku
+// Price Level 1 = Wholesale qty_break=0, Level 8 = Commercial, Level 10 = Retail
+// All other levels = 0 (Sage placeholders)
+// TODO: replace parent_sku with sage_item_id mapping once data column exists
+// TODO: filter out variants not in Sage (e.g. bulk/case sizes) once sage_export flag exists
+function buildSageExport(data) {
+  const map = {};
+  data.forEach(r => {
+    if (r.qty_break !== 0) return;
+    map[r.parent_sku] ??= {
+      item_id: r.parent_sku,
+      parent_name: decodeEntities(r.parent_name),
+      category: decodeEntities(r.category),
+      price_level_1: 0, price_level_2: 0, price_level_3: 0, price_level_4: 0,
+      price_level_5: 0, price_level_6: 0, price_level_7: 0, price_level_8: 0,
+      price_level_9: 0, price_level_10: 0,
+    };
+    if (r.tier === "Wholesale")   map[r.parent_sku].price_level_1  = r.price;
+    if (r.tier === "Commercial")  map[r.parent_sku].price_level_8  = r.price;
+    if (r.tier === "Retail")      map[r.parent_sku].price_level_10 = r.price;
+  });
+  return Object.values(map).sort((a,b) => a.item_id.localeCompare(b.item_id));
+}
+
 function pctVsWholesale(price, wsPrice) {
   if (!wsPrice) return null;
   return ((price - wsPrice) / wsPrice) * 100;
@@ -290,7 +314,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .logo-img{mix-blend-mode:multiply;border-radius:4px}
 .dark .logo-img{display:none!important}
 .dark .logo-img + .logo{display:flex!important}
-
+.logo{
   width:30px;height:30px;border-radius:6px;flex-shrink:0;
   background:var(--brand);
   display:flex;align-items:center;justify-content:center;
@@ -954,11 +978,37 @@ function SheetView({ category, visibleTiers, allData }) {
         </div>
         <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
+
+        {/* Crosstab CSV — human readable, qty breaks as columns */}
         <button className="btn" onClick={()=>downloadCSV(
-          `${activeTier}-prices${category!=="All"?"-"+category:""}.csv`,
+          `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
           ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
           rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...sheetBreaks.map(q=>v[q]??"")])
-        )}>↓ Export CSV</button>
+        )}>↓ CSV</button>
+
+        {/* JSON — normalized rows, machine readable */}
+        <button className="btn" onClick={()=>{
+          const payload = rows.map(([sku,v])=>({
+            child_sku: sku, parent_sku: v.parent_sku, parent_name: v.parent_name,
+            variant_name: v.variant_name, category: v.category, tier: activeTier,
+            prices: Object.fromEntries(sheetBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
+          }));
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
+          a.download = `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.json`;
+          a.click();
+        }}>↓ JSON</button>
+
+        {/* Sage 50 export — parent SKU + price levels 1/8/10 */}
+        <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)"}} onClick={()=>{
+          const sageRows = buildSageExport(allData);
+          const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
+          downloadCSV(
+            `sage-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
+            ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
+            filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
+          );
+        }}>↓ Sage</button>
       </div>
 
       <div className="sheet-wrap">
@@ -1087,6 +1137,19 @@ function CustomerView({ allData }) {
     );
   }
 
+  function handleJSON() {
+    const payload = filtered.map(r=>({
+      child_sku: r.child_sku, parent_sku: r.parent_sku,
+      parent_name: r.parent_name, variant_name: r.variant_name,
+      category: r.category, tier: cust.tier,
+      prices: Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
+    }));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
+    a.download = `${cust.name.replace(/\s+/g,"-")}-prices.json`;
+    a.click();
+  }
+
   const tierColor = TIER_COLORS[cust.tier] || "var(--brand)";
 
   return (
@@ -1131,6 +1194,7 @@ function CustomerView({ allData }) {
         </span>
         <button className="btn btn-a no-print" onClick={handlePDF}>⊞ Print / PDF</button>
         <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>
+        <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>
       </div>
 
       <div className="cust-wrap">
