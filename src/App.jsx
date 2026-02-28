@@ -119,15 +119,13 @@ function generateData() {
   return rows;
 }
 
-const ALL_DATA = generateData();
-
 // ─── DATA HELPERS ─────────────────────────────────────────────────────────────
 const fmt  = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n);
 const fmtP = n => (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
 
-function getProducts() {
+function getProducts(data) {
   const map = new Map();
-  ALL_DATA.forEach(r => {
+  data.forEach(r => {
     if (!map.has(r.parent_id)) map.set(r.parent_id, {
       parent_id: r.parent_id, parent_sku: r.parent_sku,
       parent_name: r.parent_name, category: r.category, image_url: r.image_url,
@@ -136,9 +134,9 @@ function getProducts() {
   return [...map.values()];
 }
 
-function getVariants(parentId) {
+function getVariants(data, parentId) {
   const map = new Map();
-  ALL_DATA.filter(r => r.parent_id === parentId).forEach(r => {
+  data.filter(r => r.parent_id === parentId).forEach(r => {
     if (!map.has(r.child_id))
       map.set(r.child_id, { child_id: r.child_id, child_sku: r.child_sku, variant_name: r.variant_name });
   });
@@ -146,9 +144,9 @@ function getVariants(parentId) {
 }
 
 // { [childSku]: { [tier]: { [qty]: price } } }
-function buildMatrix(parentId) {
+function buildMatrix(data, parentId) {
   const m = {};
-  ALL_DATA.filter(r => r.parent_id === parentId).forEach(r => {
+  data.filter(r => r.parent_id === parentId).forEach(r => {
     m[r.child_sku] ??= {};
     m[r.child_sku][r.tier] ??= {};
     m[r.child_sku][r.tier][r.qty_break] = r.price;
@@ -157,9 +155,9 @@ function buildMatrix(parentId) {
 }
 
 // For sheet view: { [childSku]: { parent_sku, parent_name, variant_name, category, [qty]: price } }
-function getTierFlat(tier) {
+function getTierFlat(data, tier) {
   const m = {};
-  ALL_DATA.filter(r => r.tier === tier).forEach(r => {
+  data.filter(r => r.tier === tier).forEach(r => {
     m[r.child_sku] ??= {
       parent_sku: r.parent_sku, parent_name: r.parent_name,
       variant_name: r.variant_name, category: r.category,
@@ -176,7 +174,7 @@ function pctVsWholesale(price, wsPrice) {
 
 // Customer: resolve price for a child_sku at a qty_break
 // qty_break=1 is a sentinel duplicate of 0 — skip it in resolution
-function resolveCustomerPrice(customer, childSku, qty) {
+function resolveCustomerPrice(data, customer, childSku, qty) {
   const special = customer.special[childSku];
   if (special) {
     // Find highest applicable break in special, ignoring break=1
@@ -189,7 +187,7 @@ function resolveCustomerPrice(customer, childSku, qty) {
   // Fall back to tier price — use display breaks (no 1) to find applicable break
   const applicable = QTY_BREAKS.filter(b => b > 0 && qty >= b);
   const qb = applicable.length ? Math.max(...applicable) : 0;
-  const tierRow = ALL_DATA.find(r => r.child_sku === childSku && r.tier === customer.tier && r.qty_break === qb);
+  const tierRow = data.find(r => r.child_sku === childSku && r.tier === customer.tier && r.qty_break === qb);
   return { price: tierRow?.price ?? null, isSpecial: false };
 }
 
@@ -627,13 +625,13 @@ function PctBadge({ price, wsPrice }) {
 }
 
 // ─── DETAIL PANEL ─────────────────────────────────────────────────────────────
-function DetailPanel({ product, visibleTiers, onClose }) {
+function DetailPanel({ product, visibleTiers, onClose, allData }) {
   const [selTier, setSelTier] = useState("All");
   const [calcVar,  setCalcVar]  = useState(null);
   const [calcQty,  setCalcQty]  = useState("");
 
-  const variants = useMemo(() => getVariants(product.parent_id), [product.parent_id]);
-  const matrix   = useMemo(() => buildMatrix(product.parent_id), [product.parent_id]);
+  const variants = useMemo(() => getVariants(allData, product.parent_id), [allData, product.parent_id]);
+  const matrix   = useMemo(() => buildMatrix(allData, product.parent_id), [allData, product.parent_id]);
   const firstSku = variants[0]?.child_sku;
   const cvSku    = calcVar || firstSku;
 
@@ -654,14 +652,14 @@ function DetailPanel({ product, visibleTiers, onClose }) {
   const tiersToShow = selTier === "All" ? visibleTiers : (visibleTiers.includes(selTier) ? [selTier] : visibleTiers);
 
   function handleCSV() {
-    const rows = ALL_DATA.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
+    const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
     downloadCSV(`${product.parent_sku}-prices.csv`,
       ["parent_sku","child_sku","variant_name","tier","qty_break","price","category","last_updated"],
       rows.map(r => [r.parent_sku,r.child_sku,r.variant_name,r.tier,r.qty_break,r.price,r.category,r.last_updated])
     );
   }
   function handleJSON() {
-    const rows = ALL_DATA.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
+    const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(rows,null,2)],{type:"application/json"}));
     a.download = `${product.parent_sku}-prices.json`; a.click();
@@ -686,7 +684,7 @@ function DetailPanel({ product, visibleTiers, onClose }) {
         <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>
         <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>
         <span className="row-count">
-          {ALL_DATA.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier)).length} rows
+          {allData.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier)).length} rows
         </span>
       </div>
 
@@ -819,12 +817,12 @@ function DetailPanel({ product, visibleTiers, onClose }) {
 }
 
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
-function SheetView({ category, visibleTiers }) {
+function SheetView({ category, visibleTiers, allData }) {
   const [tier,   setTier]   = useState(visibleTiers[0] || "Wholesale");
   const [search, setSearch] = useState("");
   const activeTier = visibleTiers.includes(tier) ? tier : visibleTiers[0];
 
-  const data = useMemo(()=>getTierFlat(activeTier), [activeTier]);
+  const data = useMemo(()=>getTierFlat(allData, activeTier), [allData, activeTier]);
 
   const rows = useMemo(()=>{
     let entries = Object.entries(data);
@@ -912,7 +910,7 @@ function SheetView({ category, visibleTiers }) {
 }
 
 // ─── CUSTOMER VIEW ────────────────────────────────────────────────────────────
-function CustomerView() {
+function CustomerView({ allData }) {
   const [custId, setCustId] = useState(MOCK_CUSTOMERS[0].id);
   const [search, setSearch] = useState("");
   const cust = MOCK_CUSTOMERS.find(c=>c.id===custId);
@@ -926,7 +924,7 @@ function CustomerView() {
         const childSku = `${p.sku}-${String(vi+1).padStart(3,"0")}`;
         const prices = {};
         QTY_BREAKS.forEach(qty => {
-          const { price, isSpecial } = resolveCustomerPrice(cust, childSku, qty);
+          const { price, isSpecial } = resolveCustomerPrice(allData, cust, childSku, qty);
           prices[qty] = { price, isSpecial };
         });
         allVariants.push({
@@ -941,7 +939,7 @@ function CustomerView() {
       if(a.category!==b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[cust]);
+  },[cust, allData]);
 
   const filtered = useMemo(()=>{
     if(!search) return rows;
@@ -1042,7 +1040,7 @@ function AuthGate({ onLogin }) {
     <div className="auth-wrap fade">
       <div className="auth-card">
         <div className="auth-logo">W</div>
-        <div className="auth-title">Patio Products Pricebook</div>
+        <div className="auth-title">PriceMatrix</div>
         <p className="auth-sub">Sign in with your company account to view pricing. Access is restricted by role.</p>
         <span className="auth-select-lbl">Sign in as (demo)</span>
         <select className="auth-select" value={sel} onChange={e=>setSel(e.target.value)}>
@@ -1064,8 +1062,6 @@ function AuthGate({ onLogin }) {
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
-const ALL_PRODUCTS = getProducts();
-
 export default function App() {
   const [user,        setUser]       = useState(null);
   const [dark,        setDark]       = useState(false);
@@ -1076,16 +1072,36 @@ export default function App() {
   const [sortBy,      setSortBy]     = useState("name");
   const [selectedProd,setSelectedProd] = useState(null);
 
+  // ── LIVE DATA ──
+  const [allData,    setAllData]    = useState([]);
+  const [loading,    setLoading]    = useState(true);
+  const [loadError,  setLoadError]  = useState(null);
+
+  useEffect(() => {
+    fetch("/.netlify/functions/sheet-data")
+      .then(r => r.json())
+      .then(rows => {
+        setAllData(rows);
+        setLoading(false);
+      })
+      .catch(err => {
+        setLoadError(err.message);
+        setLoading(false);
+      });
+  }, []);
+
   const caps = user ? getRoleCapabilities(user.role) : null;
+
+  const allProducts = useMemo(() => getProducts(allData), [allData]);
 
   const categories = useMemo(()=>{
     const m={};
-    ALL_PRODUCTS.forEach(p=>{ m[p.category]=(m[p.category]||0)+1; });
+    allProducts.forEach(p=>{ m[p.category]=(m[p.category]||0)+1; });
     return Object.keys(m).sort();
-  },[]);
+  },[allProducts]);
 
   const filtered = useMemo(()=>{
-    let list = ALL_PRODUCTS;
+    let list = allProducts;
     if(category!=="All") list=list.filter(p=>p.category===category);
     if(search){const q=search.toLowerCase();list=list.filter(p=>p.parent_name.toLowerCase().includes(q)||p.parent_sku.toLowerCase().includes(q));}
     return [...list].sort((a,b)=>{
@@ -1094,16 +1110,36 @@ export default function App() {
       if(sortBy==="cat")  return a.category.localeCompare(b.category);
       return 0;
     });
-  },[category,search,sortBy]);
+  },[allProducts,category,search,sortBy]);
 
   function getWsPrice(pid) {
-    return ALL_DATA.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
+    return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
   }
 
   if (!user) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
       <AuthGate onLogin={u=>{ setUser(u); setView("browse"); }}/>
+    </div>
+  );
+
+  if (loading) return (
+    <div className={`app${dark?" dark":""}`}>
+      <style>{CSS}</style>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"var(--t3)"}}>
+        <div style={{fontFamily:"var(--fd)",fontSize:18}}>Loading pricing data…</div>
+        <div style={{fontFamily:"var(--fm)",fontSize:11}}>Fetching from Google Sheets</div>
+      </div>
+    </div>
+  );
+
+  if (loadError) return (
+    <div className={`app${dark?" dark":""}`}>
+      <style>{CSS}</style>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"var(--coral)"}}>
+        <div style={{fontFamily:"var(--fd)",fontSize:18}}>Failed to load pricing data</div>
+        <div style={{fontFamily:"var(--fm)",fontSize:11,color:"var(--t3)"}}>{loadError}</div>
+      </div>
     </div>
   );
 
@@ -1116,7 +1152,7 @@ export default function App() {
       {/* TOPBAR */}
       <header className="topbar">
         <div className="logo">W</div>
-        <span className="brand">Patio Products Pricebook</span>
+        <span className="brand">PriceMatrix</span>
         <div className="divider"/>
         <nav className="nav">
           <button className={`nav-btn ${view==="browse"?"active":""}`} onClick={()=>setView("browse")}>⊞ Products</button>
@@ -1157,11 +1193,11 @@ export default function App() {
               <div className="sb-lbl">Category</div>
               <div className="cat-list">
                 <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>setCategory("All")}>
-                  All <span className="cat-cnt">{ALL_PRODUCTS.length}</span>
+                  All <span className="cat-cnt">{allProducts.length}</span>
                 </button>
                 {categories.map(cat=>(
                   <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>setCategory(cat)}>
-                    {cat} <span className="cat-cnt">{ALL_PRODUCTS.filter(p=>p.category===cat).length}</span>
+                    {cat} <span className="cat-cnt">{allProducts.filter(p=>p.category===cat).length}</span>
                   </button>
                 ))}
               </div>
@@ -1203,7 +1239,7 @@ export default function App() {
                 {filtered.length===0 && <div className="empty"><h3>No products found</h3><p>Adjust search or category</p></div>}
                 {filtered.map(p=>{
                   const wsPrice = getWsPrice(p.parent_id);
-                  const vars = getVariants(p.parent_id);
+                  const vars = getVariants(allData, p.parent_id);
                   const isSimple = vars.length===1&&vars[0].variant_name==="Simple";
                   return (
                     <div key={p.parent_id} className={`pcard ${selectedProd?.parent_id===p.parent_id?"on":""}`}
@@ -1237,7 +1273,7 @@ export default function App() {
               </div>
 
               {selectedProd ? (
-                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>setSelectedProd(null)}/>
+                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>setSelectedProd(null)} allData={allData}/>
               ) : (
                 <div className="detail" style={{display:"flex"}}>
                   <div className="nosel">
@@ -1252,12 +1288,12 @@ export default function App() {
 
           {/* SHEET VIEW */}
           {view==="sheet" && caps.canViewSheet && (
-            <SheetView category={category} visibleTiers={caps.tiers}/>
+            <SheetView category={category} visibleTiers={caps.tiers} allData={allData}/>
           )}
 
           {/* CUSTOMER VIEW */}
           {view==="customer" && caps.canViewCustomers && (
-            <CustomerView/>
+            <CustomerView allData={allData}/>
           )}
         </div>
       </div>
