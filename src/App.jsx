@@ -1009,19 +1009,34 @@ function SheetView({ category, visibleTiers, allData }) {
 
 // ─── CUSTOMER VIEW ────────────────────────────────────────────────────────────
 function CustomerView({ allData }) {
-  const [custId, setCustId] = useState(MOCK_CUSTOMERS[0].id);
-  const [search, setSearch] = useState("");
+  const [custId,      setCustId]      = useState(MOCK_CUSTOMERS[0].id);
+  const [search,      setSearch]      = useState("");
+  const [category,    setCategory]    = useState("All");
+  const [specialFilter, setSpecialFilter] = useState("all"); // "all" | "special" | "standard"
   const cust = MOCK_CUSTOMERS.find(c=>c.id===custId);
 
+  // Derive qty breaks from real data for this customer's tier, suppress break=1
+  const custBreaks = useMemo(()=>{
+    const breaks = new Set([0]);
+    allData.filter(r => r.tier === cust.tier && r.qty_break !== 1).forEach(r => breaks.add(r.qty_break));
+    return [...breaks].sort((a,b)=>a-b);
+  },[allData, cust]);
+
+  // All categories from real data
+  const categories = useMemo(()=>{
+    const s = new Set();
+    allData.forEach(r => { if(r.category) s.add(decodeEntities(r.category)); });
+    return [...s].sort();
+  },[allData]);
+
   const rows = useMemo(()=>{
-    // All variants across all products
     const allVariants = [];
     PRODUCTS_DEF.forEach((p, pi) => {
       const parentId = 1000 + pi*10;
       p.variants.forEach((variant, vi) => {
         const childSku = `${p.sku}-${String(vi+1).padStart(3,"0")}`;
         const prices = {};
-        QTY_BREAKS.forEach(qty => {
+        custBreaks.forEach(qty => {
           const { price, isSpecial } = resolveCustomerPrice(allData, cust, childSku, qty);
           prices[qty] = { price, isSpecial };
         });
@@ -1033,17 +1048,25 @@ function CustomerView({ allData }) {
         });
       });
     });
+    // Sort: special first, then by category, then by name
     return allVariants.sort((a,b)=>{
-      if(a.category!==b.category) return a.category.localeCompare(b.category);
+      if(a.hasSpecial !== b.hasSpecial) return b.hasSpecial ? 1 : -1;
+      if(a.category !== b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[cust, allData]);
+  },[cust, allData, custBreaks]);
+
+  // Effective category — search resets category filter
+  const effectiveCat = search ? "All" : category;
 
   const filtered = useMemo(()=>{
-    if(!search) return rows;
-    const q=search.toLowerCase();
-    return rows.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q));
-  },[rows,search]);
+    let list = rows;
+    if(effectiveCat !== "All") list = list.filter(r=>r.category===effectiveCat);
+    if(specialFilter === "special")  list = list.filter(r=>r.hasSpecial);
+    if(specialFilter === "standard") list = list.filter(r=>!r.hasSpecial);
+    if(search){ const q=search.toLowerCase(); list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q)); }
+    return list;
+  },[rows, effectiveCat, specialFilter, search]);
 
   let lastCat = null;
   const today = new Date().toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
@@ -1053,18 +1076,19 @@ function CustomerView({ allData }) {
   function handleCSV() {
     downloadCSV(
       `${cust.name.replace(/\s+/g,"-")}-prices.csv`,
-      // No "special" column — customer just sees their price
-      ["sku","product","variant","category",...QTY_BREAKS.map(q=>q===0?"price":`qty_${q}_plus`)],
+      ["sku","product","variant","category",...custBreaks.map(q=>q===0?"price":`qty_${q}_plus`)],
       filtered.map(r=>[
         r.child_sku, r.parent_name, r.variant_name, r.category,
-        ...QTY_BREAKS.map(q=>r.prices[q]?.price??"")
+        ...custBreaks.map(q=>r.prices[q]?.price??"")
       ])
     );
   }
 
+  const tierColor = TIER_COLORS[cust.tier] || "var(--brand)";
+
   return (
     <div className="custv">
-      {/* Hidden header that only shows in print/PDF */}
+      {/* Print-only header */}
       <div className="print-cust-hdr">
         <h1>Price List — {cust.name}</h1>
         <p>Prepared {today} · Prices valid as of this date · Subject to change without notice</p>
@@ -1072,48 +1096,75 @@ function CustomerView({ allData }) {
 
       <div className="cust-bar">
         <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Customer</span>
-        <select className="cust-sel" value={custId} onChange={e=>setCustId(e.target.value)}>
+        <select className="cust-sel" value={custId} onChange={e=>{ setCustId(e.target.value); setSearch(""); setCategory("All"); setSpecialFilter("all"); }}>
           {MOCK_CUSTOMERS.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <input className="inp" style={{width:200,marginLeft:"auto"}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <button className="btn btn-a" onClick={handlePDF}>⊞ Print / PDF</button>
-        <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>
+
+        {/* Tier badge — screen only */}
+        <span className="no-print" style={{
+          padding:"3px 10px",borderRadius:20,fontSize:10,fontFamily:"var(--fm)",
+          background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}40`,
+          whiteSpace:"nowrap",
+        }}>{cust.tier}</span>
+
+        <div className="divider no-print"/>
+
+        {/* Category filter */}
+        <select className="cust-sel no-print" value={category} onChange={e=>setCategory(e.target.value)}>
+          <option value="All">All Categories</option>
+          {categories.map(c=><option key={c} value={c}>{c}</option>)}
+        </select>
+
+        {/* Special filter */}
+        <select className="cust-sel no-print" value={specialFilter} onChange={e=>setSpecialFilter(e.target.value)}>
+          <option value="all">All Pricing</option>
+          <option value="special">Special Only</option>
+          <option value="standard">Standard Only</option>
+        </select>
+
+        <input className="inp no-print" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
+        <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">
+          {filtered.length} variants
+        </span>
+        <button className="btn btn-a no-print" onClick={handlePDF}>⊞ Print / PDF</button>
+        <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>
       </div>
 
       <div className="cust-wrap">
-        <table className="ct">
+        <table className="ct" style={{width:"auto"}}>
           <thead>
             <tr>
-              <th style={{minWidth:220}}>Product / Variant</th>
-              <th>SKU</th>
-              {QTY_BREAKS.map(q=><th key={q} className="r">{q===0?"Price":`${q}+`}</th>)}
+              <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
+              <th style={{position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)",minWidth:90}}>SKU</th>
+              {custBreaks.map(q=><th key={q} className="r" style={{width:"1px",whiteSpace:"nowrap",color:q===0?"var(--brand)":undefined}}>{q===0?"Price":`${q}+`}</th>)}
             </tr>
           </thead>
           <tbody>
             {filtered.map(row=>{
               const showCat = row.category !== lastCat;
               lastCat = row.category;
+              const rowBg = row.hasSpecial ? "rgba(255,95,132,.05)" : undefined;
               return [
                 showCat && (
                   <tr key={`ch-${row.category}`} className="cat-hdr">
-                    <td colSpan={2+QTY_BREAKS.length}>{row.category}</td>
+                    <td colSpan={2+custBreaks.length} style={{position:"sticky",left:0}}>{row.category}</td>
                   </tr>
                 ),
-                <tr key={row.child_sku}>
-                  <td>
+                <tr key={row.child_sku} style={{background:rowBg}}>
+                  <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,zIndex:1,background:row.hasSpecial?"rgba(255,95,132,.05)":"var(--s1)"}}>
                     <span style={{display:"flex",alignItems:"center",gap:5}}>
                       <span style={{fontFamily:"var(--fd)",fontWeight:600,fontSize:11}}>{row.parent_name}</span>
                       {row.hasSpecial && <span className="spec-flag no-print">★ special</span>}
                     </span>
                     {row.variant_name!=="Simple" && <div style={{fontSize:10,color:"var(--t2)",marginTop:1}}>{row.variant_name}</div>}
                   </td>
-                  <td><span className="s-sku">{row.child_sku}</span></td>
-                  {QTY_BREAKS.map(q=>{
+                  <td style={{position:"sticky",left:200,zIndex:1,background:row.hasSpecial?"rgba(255,95,132,.05)":"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{row.child_sku}</span></td>
+                  {custBreaks.map(q=>{
                     const {price, isSpecial} = row.prices[q] || {};
                     return (
-                      <td key={q} className="r">
+                      <td key={q} className="r" style={{whiteSpace:"nowrap"}}>
                         {price != null
-                          ? <span style={{color: q===0 ? (isSpecial?"var(--coral)":"var(--brand)") : "var(--text)"}}>{fmt(price)}</span>
+                          ? <span style={{color: q===0 ? (isSpecial?"var(--coral)":"var(--brand)") : isSpecial?"var(--coral)":"var(--text)"}}>{fmt(price)}</span>
                           : <span className="c-price-nil">—</span>}
                       </td>
                     );
