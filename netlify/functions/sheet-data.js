@@ -67,13 +67,18 @@ exports.handler = async function (event, context) {
       return obj;
     });
 
+    const zlib = require("zlib");
+    const compressed = zlib.gzipSync(JSON.stringify(data));
+
     return {
       statusCode: 200,
+      isBase64Encoded: true,
       headers: {
         "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
         "Cache-Control": "public, s-maxage=300",
       },
-      body: JSON.stringify(data),
+      body: compressed.toString("base64"),
     };
   } catch (error) {
     console.error("Sheet data fetch error:", error);
