@@ -1188,7 +1188,13 @@ function AuthGate({ onLogin }) {
   return (
     <div className="auth-wrap fade">
       <div className="auth-card">
-        <div className="auth-logo">W</div>
+        <img
+          src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
+          alt="Patio Products"
+          style={{height:48,width:"auto",objectFit:"contain"}}
+          onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
+        />
+        <div className="auth-logo" style={{display:"none"}}>W</div>
         <div className="auth-title">PriceMatrix</div>
         <p className="auth-sub">Sign in with your company account to view pricing. Access is restricted by role.</p>
         <span className="auth-select-lbl">Sign in as (demo)</span>
@@ -1333,7 +1339,13 @@ export default function App() {
 
       {/* TOPBAR */}
       <header className="topbar">
-        <div className="logo">W</div>
+        <img
+          src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
+          alt="Patio Products"
+          style={{height:32,width:"auto",objectFit:"contain",flexShrink:0}}
+          onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
+        />
+        <div className="logo" style={{display:"none"}}>W</div>
         <span className="brand">PriceMatrix</span>
         <div className="divider"/>
         <nav className="nav">
