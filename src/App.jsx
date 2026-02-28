@@ -512,7 +512,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .sheet-cnt{font-family:var(--fm);font-size:10px;color:var(--t3);margin-left:auto;white-space:nowrap}
 .sheet-cnt span{color:var(--brand);font-weight:500}
 .sheet-wrap{flex:1;overflow:auto;background:var(--bg)}
-.st{border-collapse:collapse;font-family:var(--fm);font-size:11px;min-width:100%;white-space:nowrap}
+.st{border-collapse:collapse;font-family:var(--fm);font-size:11px;white-space:nowrap;width:auto}
 .st th{
   padding:7px 12px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.07em;
   color:var(--t3);background:var(--s1);border-bottom:2px solid var(--b2);
@@ -965,7 +965,7 @@ function SheetView({ category, visibleTiers, allData }) {
               <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
               {sheetBreaks.map(q=>(
-                <th key={q} className="r" style={{color: q===0 ? color : undefined}}>
+                <th key={q} className="r" style={{color: q===0 ? color : undefined, width:"1px", whiteSpace:"nowrap"}}>
                   {q===0?"Price":`${q}+`}
                 </th>
               ))}
