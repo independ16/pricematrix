@@ -184,10 +184,11 @@ function resolveCustomerPrice(data, customer, childSku, qty) {
     const match = specBreaks.find(b => qty >= b);
     if (match !== undefined) return { price: special[match], isSpecial: true };
   }
-  // Fall back to tier price — use display breaks (no 1) to find applicable break
-  const applicable = QTY_BREAKS.filter(b => b > 0 && qty >= b);
+  // Fall back to tier price — find applicable break dynamically from real data
+  const tierRows = data.filter(r => r.child_sku === childSku && r.tier === customer.tier && r.qty_break !== 1);
+  const applicable = tierRows.map(r => r.qty_break).filter(b => b > 0 && qty >= b);
   const qb = applicable.length ? Math.max(...applicable) : 0;
-  const tierRow = data.find(r => r.child_sku === childSku && r.tier === customer.tier && r.qty_break === qb);
+  const tierRow = tierRows.find(r => r.qty_break === qb);
   return { price: tierRow?.price ?? null, isSpecial: false };
 }
 
@@ -335,7 +336,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 }
 .inp:focus{border-color:var(--brand)}
 .inp::placeholder{color:var(--t3)}
-.cat-list{display:flex;flex-direction:column;gap:1px;overflow-y:auto}
+.cat-list{display:flex;flex-direction:column;gap:1px;overflow-y:auto;max-height:300px}
 .cat-btn{
   display:flex;justify-content:space-between;align-items:center;
   padding:6px 10px;border-radius:5px;border:none;background:transparent;
@@ -366,7 +367,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .pcard{
   background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);
   overflow:hidden;cursor:pointer;transition:border-color .18s,box-shadow .18s,transform .18s;
-  box-shadow:var(--shadow);
+  box-shadow:var(--shadow);min-height:80px;
 }
 .pcard:hover{border-color:var(--brand);transform:translateY(-1px);box-shadow:0 4px 16px rgba(72,147,103,.18)}
 .pcard.on{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-dim)}
@@ -640,8 +641,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
   function resolveCalcPrice(qty) {
     const prices = matrix[cvSku]?.[calcTier];
     if (!prices) return null;
-    // Display breaks only (no break=1), find highest applicable
-    const applicable = QTY_BREAKS.filter(b => b > 0 && qty >= b);
+    const applicable = Object.keys(prices).map(Number).filter(b => b !== 1 && b > 0 && qty >= b);
     const qb = applicable.length ? Math.max(...applicable) : 0;
     return prices[qb] ?? null;
   }
@@ -651,6 +651,18 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
 
   const tiersToShow = selTier === "All" ? visibleTiers : (visibleTiers.includes(selTier) ? [selTier] : visibleTiers);
 
+  // Dynamic qty breaks derived from real data, suppressing break=1
+  function qtyBreaksAllTiers(childSku) {
+    const breaks = new Set();
+    tiersToShow.forEach(tier => {
+      Object.keys(matrix[childSku]?.[tier] || {}).map(Number).filter(b => b !== 1).forEach(b => breaks.add(b));
+    });
+    return [...breaks].sort((a,b) => a - b);
+  }
+
+  function qtyBreaksSingleTier(childSku, tier) {
+    return Object.keys(matrix[childSku]?.[tier] || {}).map(Number).filter(b => b !== 1).sort((a,b) => a - b);
+  }
   function handleCSV() {
     const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
     downloadCSV(`${product.parent_sku}-prices.csv`,
@@ -720,24 +732,25 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
       {/* Matrix */}
       <div className="det-body">
         {selTier !== "All" ? (
-          /* Single tier: variants × qty breaks, with % vs wholesale */
-          <div className="ptw">
-            <table className="pt">
-              <thead>
-                <tr>
-                  <th>Variant / SKU</th>
-                  {QTY_BREAKS.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {variants.map(v=>{
-                  return (
-                    <tr key={v.child_sku}>
+          /* Single tier: variants × qty breaks */
+          variants.map(v => {
+            const breaks = qtyBreaksSingleTier(v.child_sku, selTier);
+            return (
+              <div key={v.child_sku} className="ptw" style={{marginBottom:12}}>
+                <table className="pt">
+                  <thead>
+                    <tr>
+                      <th>Variant / SKU</th>
+                      {breaks.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
                       <td>
                         <span className="vbadge" style={{marginRight:5}}>{v.variant_name}</span>
                         <span className="skubadge">{v.child_sku}</span>
                       </td>
-                      {QTY_BREAKS.map(q=>{
+                      {breaks.map(q=>{
                         const price   = matrix[v.child_sku]?.[selTier]?.[q];
                         const wsPrice = matrix[v.child_sku]?.Wholesale?.[q];
                         const isWs    = selTier === "Wholesale";
@@ -756,60 +769,62 @@ function DetailPanel({ product, visibleTiers, onClose, allData }) {
                         );
                       })}
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          /* All tiers: one section per variant */
-          variants.map(v => (
-            <div key={v.child_sku} className="msec">
-              <div className="msec-hdr">
-                {v.variant_name} <span className="vbadge">{v.child_sku}</span>
-              </div>
-              <div className="ptw">
-                <table className="pt">
-                  <thead>
-                    <tr>
-                      <th>Tier</th>
-                      {QTY_BREAKS.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tiersToShow.map(tier=>{
-                      const isWs = tier === "Wholesale";
-                      return (
-                        <tr key={tier}>
-                          <td>
-                            <span style={{display:"flex",alignItems:"center",gap:6}}>
-                              <span className="tdot" style={{background:TIER_COLORS[tier]}}/>
-                              <span style={{color:TIER_COLORS[tier],fontSize:11}}>{tier}</span>
-                            </span>
-                          </td>
-                          {QTY_BREAKS.map(q=>{
-                            const price   = matrix[v.child_sku]?.[tier]?.[q];
-                            const wsPrice = matrix[v.child_sku]?.Wholesale?.[q];
-                            const pctVal  = !isWs && price != null && wsPrice != null ? pctVsWholesale(price, wsPrice) : null;
-                            return (
-                              <td key={q} className="r">
-                                {price != null ? (
-                                  <>
-                                    <span style={{color: q===0 ? (isWs?"var(--ws)":TIER_COLORS[tier]) : "var(--text)"}}>{fmt(price)}</span>
-                                    {q===0 && !isWs && <PctBadge price={price} wsPrice={wsPrice}/>}
-                                  </>
-                                ) : "—"}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
                   </tbody>
                 </table>
               </div>
-            </div>
-          ))
+            );
+          })
+        ) : (
+          /* All tiers: one section per variant, dynamic breaks */
+          variants.map(v => {
+            const breaks = qtyBreaksAllTiers(v.child_sku);
+            return (
+              <div key={v.child_sku} className="msec">
+                <div className="msec-hdr">
+                  {v.variant_name} <span className="vbadge">{v.child_sku}</span>
+                </div>
+                <div className="ptw">
+                  <table className="pt">
+                    <thead>
+                      <tr>
+                        <th>Tier</th>
+                        {breaks.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tiersToShow.map(tier=>{
+                        const isWs = tier === "Wholesale";
+                        return (
+                          <tr key={tier}>
+                            <td>
+                              <span style={{display:"flex",alignItems:"center",gap:6}}>
+                                <span className="tdot" style={{background:TIER_COLORS[tier]}}/>
+                                <span style={{color:TIER_COLORS[tier],fontSize:11}}>{tier}</span>
+                              </span>
+                            </td>
+                            {breaks.map(q=>{
+                              const price   = matrix[v.child_sku]?.[tier]?.[q];
+                              const wsPrice = matrix[v.child_sku]?.Wholesale?.[q];
+                              return (
+                                <td key={q} className="r">
+                                  {price != null ? (
+                                    <>
+                                      <span style={{color: q===0 ? (isWs?"var(--ws)":TIER_COLORS[tier]) : "var(--text)"}}>{fmt(price)}</span>
+                                      {q===0 && !isWs && <PctBadge price={price} wsPrice={wsPrice}/>}
+                                    </>
+                                  ) : "—"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
     </div>
@@ -837,6 +852,15 @@ function SheetView({ category, visibleTiers, allData }) {
   const color = TIER_COLORS[activeTier];
   let lastCat = null;
 
+  // Derive qty break columns dynamically from the actual data for this tier, suppress break=1
+  const sheetBreaks = useMemo(() => {
+    const breaks = new Set();
+    Object.values(data).forEach(v => {
+      Object.keys(v).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => breaks.add(b));
+    });
+    return [...breaks].sort((a,b) => a - b);
+  }, [data]);
+
   return (
     <div className="sheet">
       <div className="sheet-bar">
@@ -855,8 +879,8 @@ function SheetView({ category, visibleTiers, allData }) {
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
         <button className="btn" onClick={()=>downloadCSV(
           `${activeTier}-prices${category!=="All"?"-"+category:""}.csv`,
-          ["child_sku","parent_sku","parent_name","variant_name","category",...QTY_BREAKS.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
-          rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...QTY_BREAKS.map(q=>v[q]??"")])
+          ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
+          rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...sheetBreaks.map(q=>v[q]??"")])
         )}>↓ Export CSV</button>
       </div>
 
@@ -866,7 +890,7 @@ function SheetView({ category, visibleTiers, allData }) {
             <tr>
               <th style={{minWidth:220}}>Product / Variant</th>
               <th style={{minWidth:90}}>SKU</th>
-              {QTY_BREAKS.map(q=>(
+              {sheetBreaks.map(q=>(
                 <th key={q} className="r" style={{color: q===0 ? color : undefined}}>
                   {q===0?"Price":`${q}+`}
                 </th>
@@ -880,7 +904,7 @@ function SheetView({ category, visibleTiers, allData }) {
               return [
                 showCat && (
                   <tr key={`ch-${v.category}`} className="cat-hdr">
-                    <td colSpan={2+QTY_BREAKS.length}>{v.category}</td>
+                    <td colSpan={2+sheetBreaks.length}>{v.category}</td>
                   </tr>
                 ),
                 <tr key={sku}>
@@ -889,7 +913,7 @@ function SheetView({ category, visibleTiers, allData }) {
                     {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
                   </td>
                   <td><span className="s-sku">{sku}</span></td>
-                  {QTY_BREAKS.map(q=>{
+                  {sheetBreaks.map(q=>{
                     const p = v[q];
                     return (
                       <td key={q} className="r">
