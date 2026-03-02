@@ -657,6 +657,7 @@ function AuthGate({ onLogin, dark, setDark }) {
   const [password2, setPassword2] = useState("");
   const [loading,   setLoading]   = useState(false);
   const [error,     setError]     = useState("");
+  const [showPw,    setShowPw]    = useState(false);
 
   // Detect invite_token or recovery_token in URL hash on mount
   useEffect(() => {
@@ -727,6 +728,7 @@ function AuthGate({ onLogin, dark, setDark }) {
     if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
     setLoading(true); setError("");
     try {
+      // Step 1: verify the token and set the password
       const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -741,10 +743,29 @@ function AuthGate({ onLogin, dark, setDark }) {
         setError(verifyData.error_description || verifyData.msg || "Token is invalid or expired. Please request a new link.");
         setLoading(false); return;
       }
+
+      // Step 2: immediately do a fresh password login to commit the new password
+      // This ensures subsequent logins work — the verify token alone is one-time only
+      const verifiedEmail = verifyData.email || parseJwt(verifyData.access_token)?.email;
+      if (verifiedEmail) {
+        const loginRes = await fetch(`${GOTRUE_BASE}/token?grant_type=password`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: verifiedEmail, password }),
+        });
+        const loginData = await loginRes.json();
+        if (loginRes.ok) {
+          saveSession(loginData);
+          const user = extractUserFromToken(loginData);
+          if (user) { onLogin(user); return; }
+        }
+      }
+
+      // Fallback: use the verify token directly if fresh login fails
       saveSession(verifyData);
       const user = extractUserFromToken(verifyData);
       if (user) onLogin(user);
-      else setError("Password set, but could not read your account. Please try logging in.");
+      else setError("Password set — please sign in with your new password.");
     } catch {
       setError("Network error — please try again.");
     }
@@ -769,8 +790,15 @@ function AuthGate({ onLogin, dark, setDark }) {
               </div>
               <div className="auth-field">
                 <label className="auth-label">Password</label>
-                <input className="auth-input" type="password" placeholder="••••••••"
-                  value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" />
+                <div style={{position:"relative"}}>
+                  <input className="auth-input" type={showPw?"text":"password"} placeholder="••••••••"
+                    value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password"
+                    style={{paddingRight:36}} />
+                  <button type="button" onClick={()=>setShowPw(s=>!s)}
+                    style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",fontSize:13,padding:2}}>
+                    {showPw?"🙈":"👁"}
+                  </button>
+                </div>
               </div>
               <button className="auth-btn" type="submit" disabled={loading}>
                 {loading && <span className="auth-btn-spinner" />}
@@ -835,8 +863,15 @@ function AuthGate({ onLogin, dark, setDark }) {
               {error && <div className="auth-err">{error}</div>}
               <div className="auth-field">
                 <label className="auth-label">New Password</label>
-                <input className="auth-input" type="password" placeholder="8+ characters"
-                  value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="new-password" />
+                <div style={{position:"relative"}}>
+                  <input className="auth-input" type={showPw?"text":"password"} placeholder="8+ characters"
+                    value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="new-password"
+                    style={{paddingRight:36}} />
+                  <button type="button" onClick={()=>setShowPw(s=>!s)}
+                    style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",fontSize:13,padding:2}}>
+                    {showPw?"🙈":"👁"}
+                  </button>
+                </div>
               </div>
               <div className="auth-field">
                 <label className="auth-label">Confirm Password</label>
