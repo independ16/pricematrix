@@ -1295,7 +1295,11 @@ function AuthGate() {
         <div className="auth-logo" style={{display:"none"}}>W</div>
         <div className="auth-title">PriceMatrix</div>
         <p className="auth-sub">Sign in with your Patio Products account to access pricing.</p>
-        <button className="auth-btn" onClick={()=>window.netlifyIdentity?.open()}>
+        <button className="auth-btn" onClick={()=>{
+          const ni = window.netlifyIdentity;
+          if (ni) ni.open();
+          else setTimeout(()=>window.netlifyIdentity?.open(), 500);
+        }}>
           Sign In
         </button>
         <p className="auth-note">Access is restricted by role. Contact your administrator if you need an invitation.</p>
@@ -1319,16 +1323,6 @@ export default function App() {
 
   // ── NETLIFY IDENTITY ──
   useEffect(() => {
-    // Load the Identity widget script programmatically (Vite strips it from index.html)
-    if (!window.netlifyIdentity) {
-      const script = document.createElement("script");
-      script.src = "https://identity.netlify.com/v1/netlify-identity-widget.js";
-      script.onload = () => initIdentity();
-      document.head.appendChild(script);
-    } else {
-      initIdentity();
-    }
-
     function initIdentity() {
       const ni = window.netlifyIdentity;
       if (!ni) { setAuthReady(true); return; }
@@ -1348,7 +1342,24 @@ export default function App() {
         ni.close();
       });
       ni.on("logout", () => setUser(null));
-      ni.init();
+
+      // If already initialized (script was cached), init may have already fired
+      if (ni.currentUser()) {
+        setUser(toUser(ni.currentUser()));
+        setAuthReady(true);
+      } else {
+        ni.init();
+      }
+    }
+
+    // Load the Identity widget script programmatically
+    if (!window.netlifyIdentity) {
+      const script = document.createElement("script");
+      script.src = "https://identity.netlify.com/v1/netlify-identity-widget.js";
+      script.onload = () => initIdentity();
+      document.head.appendChild(script);
+    } else {
+      initIdentity();
     }
 
     return () => {
