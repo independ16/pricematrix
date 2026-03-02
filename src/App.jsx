@@ -32,11 +32,13 @@ const QTY_MULT  = { 0:1.0, 1:1.0, 5:0.97, 10:0.93, 25:0.88, 50:0.84, 100:0.80 };
 // User invitations: Netlify dashboard → Identity → Invite users (admin access only)
 // Role assignment: Identity dashboard → click user → Roles
 
-// MOCK AUTH — replaced by Netlify Identity widget on deploy
+// ─── TEMPORARY MOCK AUTH — replace with GoTrue custom form ──────────────────
+// Real Netlify Identity widget has race condition with Vite/React hash handling.
+// Using mock auth for soft rollout training. Custom GoTrue login form in progress.
 const MOCK_USERS = [
-  { id:"u1", email:"admin@example.com",   name:"Admin User",   role:"admin"   },
-  { id:"u2", email:"manager@example.com", name:"Sales Manager",role:"manager" },
-  { id:"u3", email:"viewer@example.com",  name:"Viewer",       role:"viewer"  },
+  { id:"u1", email:"admin@patioproducts.com",   name:"Admin",   role:"admin"   },
+  { id:"u2", email:"manager@patioproducts.com", name:"Manager", role:"manager" },
+  { id:"u3", email:"viewer@patioproducts.com",  name:"Viewer",  role:"viewer"  },
 ];
 
 function getRoleCapabilities(role) {
@@ -1294,9 +1296,8 @@ function CustomerView({ allData, caps }) {
 }
 
 // ─── AUTH GATE ────────────────────────────────────────────────────────────────
-// Shown briefly while Netlify Identity initialises. Once the widget fires
-// its 'init' or 'login' event this component is never seen again.
-function AuthGate() {
+function AuthGate({ onLogin }) {
+  const [sel, setSel] = useState(MOCK_USERS[0].id);
   return (
     <div className="auth-wrap fade">
       <div className="auth-card">
@@ -1309,15 +1310,16 @@ function AuthGate() {
         />
         <div className="auth-logo" style={{display:"none"}}>W</div>
         <div className="auth-title">PriceMatrix</div>
-        <p className="auth-sub">Sign in with your Patio Products account to access pricing.</p>
-        <button className="auth-btn" onClick={()=>{
-          const ni = window.netlifyIdentity;
-          if (ni) ni.open();
-          else setTimeout(()=>window.netlifyIdentity?.open(), 500);
-        }}>
-          Sign In
+        <p className="auth-sub">Select your access level to continue.</p>
+        <select className="auth-select" value={sel} onChange={e=>setSel(e.target.value)}>
+          {MOCK_USERS.map(u=>(
+            <option key={u.id} value={u.id}>{u.role.charAt(0).toUpperCase()+u.role.slice(1)}</option>
+          ))}
+        </select>
+        <button className="auth-btn" onClick={()=>onLogin(MOCK_USERS.find(u=>u.id===sel))}>
+          Continue
         </button>
-        <p className="auth-note">Access is restricted by role. Contact your administrator if you need an invitation.</p>
+        <p className="auth-note">Training access · Secure login coming soon</p>
       </div>
     </div>
   );
@@ -1326,7 +1328,6 @@ function AuthGate() {
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [user,        setUser]       = useState(null);
-  const [authReady,   setAuthReady]  = useState(false);
   const [dark,        setDark]       = useState(false);
   const [showImages,  setShowImages] = useState(true);
   const [view,        setView]       = useState("browse");
@@ -1335,62 +1336,6 @@ export default function App() {
   const [sortBy,      setSortBy]     = useState("name");
   const [selectedProd,setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku] = useState(null);
-
-  // ── NETLIFY IDENTITY ──
-  useEffect(() => {
-    function initIdentity() {
-      const ni = window.netlifyIdentity;
-      if (!ni) { setAuthReady(true); return; }
-
-      function toUser(u) {
-        const role = u?.app_metadata?.roles?.[0] ?? "viewer";
-        return { id: u.id, name: u.user_metadata?.full_name ?? u.email, email: u.email, role };
-      }
-
-      ni.on("init", u => {
-        if (u) setUser(toUser(u));
-        setAuthReady(true);
-      });
-      ni.on("login", u => {
-        setUser(toUser(u));
-        setView("browse");
-        ni.close();
-      });
-      ni.on("logout", () => setUser(null));
-
-      // If already initialized (script was cached), init may have already fired
-      if (ni.currentUser()) {
-        setUser(toUser(ni.currentUser()));
-        setAuthReady(true);
-      } else {
-        // Restore hash if it was stripped before widget loaded
-        if (INITIAL_HASH && (
-          INITIAL_HASH.includes("invite_token") ||
-          INITIAL_HASH.includes("recovery_token") ||
-          INITIAL_HASH.includes("confirmation_token")
-        )) {
-          window.location.hash = INITIAL_HASH;
-          // Widget handles the token itself — don't call open(), it will auto-trigger
-        }
-        ni.init();
-      }
-    }
-
-    // Load the Identity widget script programmatically
-    if (!window.netlifyIdentity) {
-      const script = document.createElement("script");
-      script.src = "https://identity.netlify.com/v1/netlify-identity-widget.js";
-      script.onload = () => initIdentity();
-      document.head.appendChild(script);
-    } else {
-      initIdentity();
-    }
-
-    return () => {
-      const ni = window.netlifyIdentity;
-      if (ni) { ni.off("init"); ni.off("login"); ni.off("logout"); }
-    };
-  }, []);
 
   // ── LIVE DATA ──
   const [allData,    setAllData]    = useState([]);
@@ -1468,19 +1413,10 @@ export default function App() {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
   }
 
-  if (!authReady) return (
-    <div className={`app${dark?" dark":""}`}>
-      <style>{CSS}</style>
-      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--t3)"}}>
-        <div style={{fontFamily:"var(--fd)",fontSize:16}}>Loading…</div>
-      </div>
-    </div>
-  );
-
   if (!user) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
-      <AuthGate/>
+      <AuthGate onLogin={u=>{ setUser(u); setView("browse"); }}/>
     </div>
   );
 
@@ -1572,7 +1508,7 @@ export default function App() {
             style={!showImages?{color:"var(--t4)"}:{}}>
             ⊟
           </button>
-          <div className="user-chip" onClick={()=>window.netlifyIdentity?.logout()} title="Click to sign out">
+          <div className="user-chip" onClick={()=>setUser(null)} title="Click to sign out">
             <div className="user-avatar">{user.name[0]}</div>
             {user.name}
             <span className="role-badge">{user.role}</span>
