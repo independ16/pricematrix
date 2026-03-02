@@ -1,16 +1,11 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 
-// Capture any auth token from the URL hash immediately at module load,
-// before React or the router can strip it.
-const INITIAL_HASH = window.location.hash || "";
-
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const TIERS = ["Retail", "Commercial", "Wholesale", "Wholesale_L2", "Wholesale_L3"];
 const ALL_TIERS = [...TIERS, "OEM"];
 const QTY_BREAKS_ALL  = [0, 1, 5, 10, 25, 50, 100]; // full data set (1 may exist as dupe of 0)
 const QTY_BREAKS      = [0, 5, 10, 25, 50, 100];     // display columns — qty_break 1 suppressed
 
-// Tier colors readable on both light slate and dark backgrounds
 const TIER_COLORS = {
   Retail:       "#c94040",
   Commercial:   "#b87020",
@@ -23,81 +18,138 @@ const TIER_COLORS = {
 const TIER_MULT = { Retail:1.0, Commercial:0.88, Wholesale:0.75, Wholesale_L2:0.65, Wholesale_L3:0.58, OEM:0.50 };
 const QTY_MULT  = { 0:1.0, 1:1.0, 5:0.97, 10:0.93, 25:0.88, 50:0.84, 100:0.80 };
 
-// ─── NETLIFY IDENTITY AUTH LAYER ──────────────────────────────────────────────
-// Role mapping:
-//   admin    → everything: all tiers, all views, all exports, sync (when built)
-//   manager  → all tiers, Browse + Sheet + Customer View (read), crosstab CSV only
-//   viewer   → Browse + Sheet View only, no exports, no Customer View
+// ─── GOTRUE AUTH LAYER ────────────────────────────────────────────────────────
+// Uses Netlify Identity's GoTrue API directly — no widget, no race conditions.
 //
-// User invitations: Netlify dashboard → Identity → Invite users (admin access only)
-// Role assignment: Identity dashboard → click user → Roles
+// Endpoints (all relative to /.netlify/identity):
+//   POST /token          — email+password login (grant_type=password)
+//   POST /token          — refresh (grant_type=refresh_token)
+//   POST /logout         — invalidate token (requires Bearer)
+//   POST /verify         — accept invite or recovery token, set password
+//   POST /recover        — send password reset email
+//
+// Role mapping (set in Netlify Identity dashboard → User → Roles):
+//   admin        → all tiers + customer view + sheet view + all exports + sync
+//   manager      → all tiers + customer view (read) + sheet view + CSV export
+//   viewer       → all tiers + sheet view, no exports
+//   commercial   → Commercial tier only + sheet view
+//   wholesale    → Wholesale / Wholesale_L2 / Wholesale_L3 + sheet view
+//   retail       → Retail tier only + sheet view
+//
+// JWT role is in:  token.app_metadata.roles[0]
+// Fallback role if none assigned: "viewer"
 
-// ─── TEMPORARY MOCK AUTH — replace with GoTrue custom form ──────────────────
-// Real Netlify Identity widget has race condition with Vite/React hash handling.
-// Using mock auth for soft rollout training. Custom GoTrue login form in progress.
-const MOCK_USERS = [
-  { id:"u1", email:"admin@patioproducts.com",   name:"Admin",   role:"admin"   },
-  { id:"u2", email:"manager@patioproducts.com", name:"Manager", role:"manager" },
-  { id:"u3", email:"viewer@patioproducts.com",  name:"Viewer",  role:"viewer"  },
-];
+const GOTRUE_BASE = "/.netlify/identity";
+
+// Parse a JWT payload without a library
+function parseJwt(token) {
+  try {
+    const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(base64));
+  } catch { return null; }
+}
+
+function extractUserFromToken(tokenData) {
+  // tokenData = { access_token, refresh_token, expires_in, token_type }
+  const payload = parseJwt(tokenData.access_token);
+  if (!payload) return null;
+  const role = payload.app_metadata?.roles?.[0] ?? "viewer";
+  const name = payload.user_metadata?.full_name
+    || payload.user_metadata?.name
+    || payload.email
+    || "User";
+  return {
+    id: payload.sub,
+    email: payload.email,
+    name,
+    role,
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token,
+    expiresAt: Date.now() + (tokenData.expires_in ?? 3600) * 1000,
+  };
+}
+
+// Persist session to sessionStorage so a page refresh doesn't log them out
+const SESSION_KEY = "pm_session";
+function saveSession(tokenData) {
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(tokenData)); } catch {}
+}
+function loadSession() {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch { return null; }
+}
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
+}
 
 function getRoleCapabilities(role) {
   switch(role) {
-    case "admin":   return {
+    case "admin":      return {
       tiers: TIERS,
       canViewCustomers: true,
-      canViewSheet: true,
-      canExportCSV: true,   // crosstab CSV
-      canExportJSON: true,  // JSON (machine readable)
-      canExportSage: true,  // Sage 50
-      canSync: true,        // trigger data sync (when built)
+      canViewSheet:     true,
+      canExportCSV:     true,
+      canExportJSON:    true,
+      canExportSage:    true,
+      canSync:          true,
     };
-    case "manager": return {
+    case "manager":    return {
       tiers: TIERS,
-      canViewCustomers: true,  // can see Customer View (demo data banner shown)
-      canViewSheet: true,
-      canExportCSV: true,      // crosstab CSV only
-      canExportJSON: false,
-      canExportSage: false,
-      canSync: false,
+      canViewCustomers: true,
+      canViewSheet:     true,
+      canExportCSV:     true,
+      canExportJSON:    false,
+      canExportSage:    false,
+      canSync:          false,
     };
-    case "viewer":  return {
+    case "viewer":     return {
       tiers: TIERS,
       canViewCustomers: false,
-      canViewSheet: true,
-      canExportCSV: false,
-      canExportJSON: false,
-      canExportSage: false,
-      canSync: false,
+      canViewSheet:     true,
+      canExportCSV:     false,
+      canExportJSON:    false,
+      canExportSage:    false,
+      canSync:          false,
     };
-    default:        return {
+    case "commercial": return {
+      tiers: ["Commercial"],
+      canViewCustomers: false,
+      canViewSheet:     true,
+      canExportCSV:     false,
+      canExportJSON:    false,
+      canExportSage:    false,
+      canSync:          false,
+    };
+    case "wholesale":  return {
+      tiers: ["Wholesale","Wholesale_L2","Wholesale_L3"],
+      canViewCustomers: false,
+      canViewSheet:     true,
+      canExportCSV:     false,
+      canExportJSON:    false,
+      canExportSage:    false,
+      canSync:          false,
+    };
+    case "retail":     return {
+      tiers: ["Retail"],
+      canViewCustomers: false,
+      canViewSheet:     true,
+      canExportCSV:     false,
+      canExportJSON:    false,
+      canExportSage:    false,
+      canSync:          false,
+    };
+    default:           return {
       tiers: [],
       canViewCustomers: false,
-      canViewSheet: false,
-      canExportCSV: false,
-      canExportJSON: false,
-      canExportSage: false,
-      canSync: false,
+      canViewSheet:     false,
+      canExportCSV:     false,
+      canExportJSON:    false,
+      canExportSage:    false,
+      canSync:          false,
     };
   }
 }
 
-// ─── MOCK DATA ────────────────────────────────────────────────────────────────
-const PRODUCTS_DEF = [
-  { sku:"LUB-PRO",  name:"Industrial Lubricant Pro",   cat:"Lubricants", variants:["1lb","5lb","10lb","55lb"], img:"https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=300&q=80", basePrices:[28.99,89.99,149.99,699.99] },
-  { sku:"LUB-LITE", name:"Light Machine Oil",          cat:"Lubricants", variants:["Simple"],                  img:"https://images.unsplash.com/photo-1580584126903-c17d41830450?w=300&q=80", basePrices:[14.99] },
-  { sku:"ADH-EP",   name:"Epoxy Adhesive 2-Part",      cat:"Adhesives",  variants:["50ml","250ml","1L"],       img:"https://images.unsplash.com/photo-1617791160588-241658ad6869?w=300&q=80", basePrices:[12.99,54.99,189.99] },
-  { sku:"ADH-CA",   name:"Cyanoacrylate Instant Bond", cat:"Adhesives",  variants:["Simple"],                  img:"https://images.unsplash.com/photo-1601933470096-0e34634ffcde?w=300&q=80", basePrices:[8.99] },
-  { sku:"COA-ZN",   name:"Zinc Primer Coating",        cat:"Coatings",   variants:["1gal","5gal"],             img:"https://images.unsplash.com/photo-1562259929-b4e1fd3aef09?w=300&q=80", basePrices:[49.99,219.99] },
-  { sku:"COA-EP",   name:"Epoxy Floor Coating",        cat:"Coatings",   variants:["1gal","5gal","55gal"],     img:"https://images.unsplash.com/photo-1503387762-592deb58ef4e?w=300&q=80", basePrices:[64.99,289.99,2799.99] },
-  { sku:"SEA-RTV",  name:"RTV Silicone Sealant",       cat:"Sealants",   variants:["Simple"],                  img:"https://images.unsplash.com/photo-1609365634878-b73e2f56ca9d?w=300&q=80", basePrices:[11.49] },
-  { sku:"SEA-PU",   name:"Polyurethane Sealant",       cat:"Sealants",   variants:["300ml","600ml"],           img:"https://images.unsplash.com/photo-1585771724684-38269d6639fd?w=300&q=80", basePrices:[9.99,18.49] },
-  { sku:"CLN-IND",  name:"Industrial Degreaser",       cat:"Cleaners",   variants:["1gal","5gal","55gal"],     img:"https://images.unsplash.com/photo-1563453392212-326f5e854473?w=300&q=80", basePrices:[34.99,149.99,1199.99] },
-  { sku:"CLN-EL",   name:"Electronic Contact Cleaner", cat:"Cleaners",   variants:["Simple"],                  img:"https://images.unsplash.com/photo-1601933470096-0e34634ffcde?w=300&q=80", basePrices:[16.99] },
-  { sku:"GRS-MP",   name:"Multi-Purpose Grease",       cat:"Greases",    variants:["1lb","5lb","35lb"],        img:"https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=300&q=80", basePrices:[22.99,89.99,549.99] },
-  { sku:"GRS-HT",   name:"High-Temp Bearing Grease",   cat:"Greases",    variants:["Simple"],                  img:"https://images.unsplash.com/photo-1580584126903-c17d41830450?w=300&q=80", basePrices:[31.99] },
-];
-
+// ─── MOCK CUSTOMERS (still in use until real customer data is wired up) ───────
 const MOCK_CUSTOMERS = [
   {
     id:"cust-001", name:"Acme Industrial Supply", tier:"Wholesale",
@@ -122,32 +174,6 @@ const MOCK_CUSTOMERS = [
   },
 ];
 
-function generateData() {
-  const rows = []; let uid = 1; const now = "2026-02-25";
-  PRODUCTS_DEF.forEach((p, pi) => {
-    const parentId = 1000 + pi * 10;
-    p.variants.forEach((variant, vi) => {
-      const isSimple = variant === "Simple";
-      const childId  = isSimple ? parentId : parentId + vi + 1;
-      const childSku = `${p.sku}-${String(vi+1).padStart(3,"0")}`;
-      const base     = p.basePrices[vi] ?? 19.99;
-      ALL_TIERS.forEach(tier => {
-        QTY_BREAKS_ALL.forEach(qty => {
-          rows.push({
-            uid: uid++, parent_id: parentId, child_id: childId,
-            parent_sku: p.sku, child_sku: childSku,
-            parent_name: p.name, variant_name: variant,
-            tier, qty_break: qty,
-            price: +(base * TIER_MULT[tier] * QTY_MULT[qty]).toFixed(2),
-            category: p.cat, image_url: p.img, customer_id: null, last_updated: now,
-          });
-        });
-      });
-    });
-  });
-  return rows;
-}
-
 // ─── DATA HELPERS ─────────────────────────────────────────────────────────────
 const fmt  = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n);
 const fmtP = n => (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
@@ -169,7 +195,10 @@ function getVariants(data, parentId) {
   const map = new Map();
   data.filter(r => r.parent_id === parentId).forEach(r => {
     if (!map.has(r.child_id))
-      map.set(r.child_id, { child_id: r.child_id, child_sku: r.child_sku, variant_name: r.variant_name });
+      map.set(r.child_id, {
+        child_id: r.child_id, child_sku: r.child_sku,
+        variant_name: decodeEntities(r.variant_name),
+      });
   });
   return [...map.values()];
 }
@@ -217,9 +246,9 @@ function buildSageExport(data) {
       price_level_5: 0, price_level_6: 0, price_level_7: 0, price_level_8: 0,
       price_level_9: 0, price_level_10: 0,
     };
-    if (r.tier === "Wholesale")   map[r.parent_sku].price_level_1  = r.price;
-    if (r.tier === "Commercial")  map[r.parent_sku].price_level_8  = r.price;
-    if (r.tier === "Retail")      map[r.parent_sku].price_level_10 = r.price;
+    if (r.tier === "Wholesale")  map[r.parent_sku].price_level_1  = r.price;
+    if (r.tier === "Commercial") map[r.parent_sku].price_level_8  = r.price;
+    if (r.tier === "Retail")     map[r.parent_sku].price_level_10 = r.price;
   });
   return Object.values(map).sort((a,b) => a.item_id.localeCompare(b.item_id));
 }
@@ -234,7 +263,6 @@ function pctVsWholesale(price, wsPrice) {
 function resolveCustomerPrice(data, customer, childSku, qty) {
   const special = customer.special[childSku];
   if (special) {
-    // Find highest applicable break in special, ignoring break=1
     const specBreaks = Object.keys(special).map(Number)
       .filter(b => b !== 1)
       .sort((a,b) => b - a);
@@ -252,18 +280,29 @@ function resolveCustomerPrice(data, customer, childSku, qty) {
 // Decode HTML entities in strings from WooCommerce (e.g. &amp; → &)
 function decodeEntities(str) {
   if (!str) return str;
-  return str.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#039;/g,"'");
+  return str
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&nbsp;/g, " ");
 }
 
 function downloadCSV(filename, headers, rows) {
+  const csv = [
+    headers.join(","),
+    ...rows.map(r => r.map(v =>
+      typeof v === "string" && (v.includes(",") || v.includes('"'))
+        ? `"${v.replace(/"/g, '""')}"` : v ?? ""
+    ).join(","))
+  ].join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
   a.download = filename; a.click();
 }
 
 // ─── CSS ──────────────────────────────────────────────────────────────────────
-// Light mode (default): slate/blue-gray base, brand green #489367, coral #ff5f84 accent
-// Dark mode: toggled via .dark class on .app
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Syne:wght@600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -278,8 +317,8 @@ const CSS = `
   --b1:#c0cad5;
   --b2:#aab6c4;
   --b3:#8fa0b2;
-  --brand:#3a7d58;          /* slightly deeper green for light bg contrast */
-  --brand-lt:#489367;       /* true brand green */
+  --brand:#3a7d58;
+  --brand-lt:#489367;
   --brand-dim:rgba(72,147,103,.12);
   --coral:#ff5f84;
   --coral-dim:rgba(255,95,132,.12);
@@ -287,14 +326,16 @@ const CSS = `
   --t2:#4a5f70;
   --t3:#7a8fa0;
   --t4:#b0bfcc;
-  --ws:#2d6e47;             /* darker green for wholesale label on light */
+  --ws:#2d6e47;
   --ws-bg:rgba(72,147,103,.1);
-  --above:#c94040;          /* retail/commercial above-wholesale indicator */
+  --above:#c94040;
   --above-bg:rgba(201,64,64,.1);
-  --below:#2d7a5a;          /* L2/L3 below-wholesale indicator */
+  --below:#2d7a5a;
   --below-bg:rgba(45,122,90,.1);
-  --gold:#8a6800;            /* amber on light */
+  --gold:#8a6800;
   --gold-bg:rgba(138,104,0,.08);
+  --err:#c94040;
+  --err-bg:rgba(201,64,64,.08);
   --fd:'Syne',sans-serif;--fm:'DM Mono',monospace;--fb:'DM Sans',sans-serif;
   --r:7px;
   --shadow:0 1px 4px rgba(0,0,0,.08),0 4px 16px rgba(0,0,0,.06);
@@ -327,6 +368,8 @@ const CSS = `
   --below-bg:rgba(76,201,240,.1);
   --gold:#f0c040;
   --gold-bg:rgba(240,192,64,.1);
+  --err:#ff7a7a;
+  --err-bg:rgba(255,122,122,.1);
   --shadow:0 2px 8px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.2);
 }
 
@@ -340,80 +383,38 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   display:flex;align-items:center;gap:16px;flex-shrink:0;z-index:100;
   box-shadow:var(--shadow);
 }
-.logo-img{mix-blend-mode:multiply;border-radius:4px}
-.dark .logo-img{display:none!important}
-.dark .logo-img + .logo{display:flex!important}
-.logo{
-  width:30px;height:30px;border-radius:6px;flex-shrink:0;
-  background:var(--brand);
-  display:flex;align-items:center;justify-content:center;
-  font-family:var(--fd);font-weight:800;font-size:13px;color:#fff;letter-spacing:-.5px;
-}
+.logo{width:30px;height:30px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--brand);}
+.logo img{width:30px;height:30px;object-fit:contain;mix-blend-mode:multiply;}
+.dark .logo img{mix-blend-mode:normal;opacity:.85;}
+.logo-fallback{font-family:var(--fd);font-weight:800;font-size:13px;color:#fff;letter-spacing:-.5px;}
 .brand{font-family:var(--fd);font-weight:700;font-size:16px;letter-spacing:-.3px;white-space:nowrap;flex-shrink:0;color:var(--text)}
 .divider{width:1px;height:20px;background:var(--b1);flex-shrink:0}
 .nav{display:flex;gap:2px}
-.nav-btn{
-  padding:5px 13px;border-radius:6px;border:none;background:transparent;
-  color:var(--t3);font-size:12px;font-family:var(--fb);cursor:pointer;transition:all .15s;white-space:nowrap;
-}
+.nav-btn{padding:5px 13px;border-radius:6px;border:none;background:transparent;color:var(--t3);font-size:12px;font-family:var(--fb);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .nav-btn:hover{color:var(--t2);background:var(--s3)}
 .nav-btn.active{background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.25)}
-.nav-btn.cust-active{color:var(--brand)!important}
 .topbar-end{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0}
-
-/* Dark mode toggle */
-.theme-btn{
-  width:32px;height:32px;border-radius:6px;border:1px solid var(--b2);
-  background:var(--s3);color:var(--t2);font-size:14px;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;transition:all .15s;
-}
+.theme-btn{width:32px;height:32px;border-radius:6px;border:1px solid var(--b2);background:var(--s3);color:var(--t2);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;}
 .theme-btn:hover{background:var(--s4);color:var(--text)}
-
-.user-chip{
-  display:flex;align-items:center;gap:7px;padding:4px 10px 4px 5px;
-  border-radius:20px;background:var(--s3);border:1px solid var(--b2);cursor:pointer;
-  font-size:11px;font-family:var(--fm);color:var(--t2);transition:all .15s;
-}
+.user-chip{display:flex;align-items:center;gap:7px;padding:4px 10px 4px 5px;border-radius:20px;background:var(--s3);border:1px solid var(--b2);cursor:pointer;font-size:11px;font-family:var(--fm);color:var(--t2);transition:all .15s;}
 .user-chip:hover{background:var(--s4);color:var(--text)}
-.user-avatar{
-  width:22px;height:22px;border-radius:50%;
-  background:var(--brand);
-  display:flex;align-items:center;justify-content:center;
-  font-size:9px;font-weight:700;color:#fff;flex-shrink:0;
-}
-.role-badge{
-  padding:2px 6px;border-radius:20px;font-size:9px;font-family:var(--fm);
-  background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.3);
-  text-transform:uppercase;letter-spacing:.06em;
-}
+.user-avatar{width:22px;height:22px;border-radius:50%;background:var(--brand);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;flex-shrink:0;}
+.role-badge{padding:2px 6px;border-radius:20px;font-size:9px;font-family:var(--fm);background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.3);text-transform:uppercase;letter-spacing:.06em;}
 
 /* ── BODY LAYOUT ── */
 .body{flex:1;display:flex;overflow:hidden}
-.sidebar{
-  width:200px;min-width:200px;background:var(--s1);border-right:1px solid var(--b1);
-  display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;
-}
+.sidebar{width:200px;min-width:200px;background:var(--s1);border-right:1px solid var(--b1);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
 .sb-sec{padding:12px 14px;border-bottom:1px solid var(--b1)}
 .sb-lbl{font-family:var(--fm);font-size:9px;color:var(--t3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:7px}
-.inp{
-  width:100%;padding:7px 10px;background:var(--s2);border:1px solid var(--b1);
-  border-radius:6px;color:var(--text);font-family:var(--fb);font-size:12px;outline:none;transition:border-color .2s;
-}
+.inp{width:100%;padding:7px 10px;background:var(--s2);border:1px solid var(--b1);border-radius:6px;color:var(--text);font-family:var(--fb);font-size:12px;outline:none;transition:border-color .2s;}
 .inp:focus{border-color:var(--brand)}
 .inp::placeholder{color:var(--t3)}
 .cat-list{display:flex;flex-direction:column;gap:1px;overflow-y:auto;max-height:300px}
-.cat-btn{
-  display:flex;justify-content:space-between;align-items:center;
-  padding:6px 10px;border-radius:5px;border:none;background:transparent;
-  color:var(--t2);font-size:12px;font-family:var(--fb);cursor:pointer;transition:all .12s;width:100%;text-align:left;
-}
+.cat-btn{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-radius:5px;border:none;background:transparent;color:var(--t2);font-size:12px;font-family:var(--fb);cursor:pointer;transition:all .12s;width:100%;text-align:left;}
 .cat-btn:hover{background:var(--s3);color:var(--text)}
 .cat-btn.on{background:var(--brand-dim);color:var(--brand);font-weight:500}
 .cat-cnt{font-family:var(--fm);font-size:10px;color:var(--t3)}
-.sel{
-  width:100%;padding:6px 10px;background:var(--s2);border:1px solid var(--b1);
-  border-radius:6px;color:var(--text);font-size:12px;font-family:var(--fb);outline:none;cursor:pointer;
-}
+.sel{width:100%;padding:6px 10px;background:var(--s2);border:1px solid var(--b1);border-radius:6px;color:var(--text);font-size:12px;font-family:var(--fb);outline:none;cursor:pointer;}
 .sel option{background:var(--s2)}
 .tier-legend{display:flex;flex-direction:column;gap:5px}
 .tleg-row{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--t2)}
@@ -425,26 +426,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .main{flex:1;display:flex;overflow:hidden}
 
 /* ── CARD GRID ── */
-.grid{
-  flex:1;overflow-y:auto;padding:14px;
-  display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;align-content:start;
-}
-.pcard{
-  background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);
-  overflow:hidden;cursor:pointer;transition:border-color .18s,box-shadow .18s,transform .18s;
-  box-shadow:var(--shadow);min-height:80px;
-}
+.grid{flex:1;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;align-content:start;}
+.pcard{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);overflow:hidden;cursor:pointer;transition:border-color .18s,box-shadow .18s,transform .18s;box-shadow:var(--shadow);min-height:80px;}
 .pcard:hover{border-color:var(--brand);transform:translateY(-1px);box-shadow:0 4px 16px rgba(72,147,103,.18)}
 .pcard.on{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-dim)}
 .pcard-img-wrap{width:100%;height:110px;overflow:hidden;background:var(--s3);position:relative;flex-shrink:0}
 .pcard-img{width:100%;height:110px;object-fit:cover;display:block}
-.pcard-img-ph{
-  width:100%;height:110px;position:absolute;top:0;left:0;
-  align-items:center;justify-content:center;
-  background:var(--s3);
-  font-family:var(--fd);font-size:32px;font-weight:800;
-  color:var(--brand);opacity:.25;letter-spacing:-1px;
-}
+.pcard-img-ph{width:100%;height:110px;position:absolute;top:0;left:0;display:none;align-items:center;justify-content:center;background:var(--s3);font-family:var(--fd);font-size:32px;font-weight:800;color:var(--brand);opacity:.25;letter-spacing:-1px;}
 .pcard-body{padding:10px 12px}
 .pcard-cat{font-family:var(--fm);font-size:8px;color:var(--brand);text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px}
 .pcard-name{font-family:var(--fd);font-weight:600;font-size:12px;line-height:1.3;margin-bottom:3px;color:var(--text)}
@@ -458,11 +446,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .empty h3{font-family:var(--fd);margin-bottom:6px;font-size:16px}
 
 /* ── DETAIL PANEL ── */
-.detail{
-  width:560px;min-width:560px;background:var(--s1);border-left:1px solid var(--b1);
-  display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;
-  box-shadow:-2px 0 12px rgba(0,0,0,.05);
-}
+.detail{width:560px;min-width:560px;background:var(--s1);border-left:1px solid var(--b1);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;box-shadow:-2px 0 12px rgba(0,0,0,.05);}
 .det-hdr{padding:14px 18px;border-bottom:1px solid var(--b1);display:flex;gap:12px;align-items:flex-start;flex-shrink:0}
 .det-img{width:60px;height:60px;object-fit:cover;border-radius:7px;background:var(--s3);flex-shrink:0;border:1px solid var(--b1)}
 .det-info{flex:1;min-width:0}
@@ -471,10 +455,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .det-sku{font-family:var(--fm);font-size:10px;color:var(--t3)}
 .det-close{background:none;border:1px solid var(--b1);color:var(--t3);font-size:16px;cursor:pointer;padding:3px 7px;border-radius:5px;transition:all .15s;flex-shrink:0}
 .det-close:hover{color:var(--text);background:var(--s3)}
-
 .det-acts{padding:9px 18px;border-bottom:1px solid var(--b1);display:flex;gap:7px;align-items:center;flex-shrink:0;background:var(--s2)}
 .btn{padding:5px 12px;border-radius:6px;border:1px solid var(--b2);font-size:11px;font-family:var(--fm);cursor:pointer;transition:all .15s;background:var(--s1);color:var(--t2)}
 .btn:hover{background:var(--s3);color:var(--text)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
 .btn-a{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:500}
 .btn-a:hover{background:var(--brand-lt);border-color:var(--brand-lt)}
 .btn-o{background:transparent;border-color:rgba(72,147,103,.4);color:var(--brand)}
@@ -482,20 +466,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .row-count{font-family:var(--fm);font-size:10px;color:var(--t3);margin-left:auto}
 
 /* CALC */
-.calc{
-  padding:9px 18px;border-bottom:1px solid var(--b1);
-  background:var(--s2);display:flex;align-items:center;gap:9px;flex-shrink:0;flex-wrap:wrap;
-}
+.calc{padding:9px 18px;border-bottom:1px solid var(--b1);background:var(--s2);display:flex;align-items:center;gap:9px;flex-shrink:0;flex-wrap:wrap;}
 .calc-lbl{font-family:var(--fm);font-size:10px;color:var(--t3);white-space:nowrap}
-.calc-var{
-  padding:5px 8px;background:var(--s1);border:1px solid var(--b1);border-radius:6px;
-  color:var(--text);font-family:var(--fm);font-size:11px;outline:none;cursor:pointer;
-}
+.calc-var{padding:5px 8px;background:var(--s1);border:1px solid var(--b1);border-radius:6px;color:var(--text);font-family:var(--fm);font-size:11px;outline:none;cursor:pointer;}
 .calc-var option{background:var(--s1)}
-.calc-qty{
-  width:72px;padding:5px 8px;background:var(--s1);border:1px solid var(--b1);
-  border-radius:6px;color:var(--text);font-family:var(--fm);font-size:12px;outline:none;transition:border-color .2s;
-}
+.calc-qty{width:72px;padding:5px 8px;background:var(--s1);border:1px solid var(--b1);border-radius:6px;color:var(--text);font-family:var(--fm);font-size:12px;outline:none;transition:border-color .2s;}
 .calc-qty:focus{border-color:var(--brand)}
 .calc-arrow{color:var(--b3);font-size:12px}
 .calc-total{font-family:var(--fm);font-size:14px;font-weight:500;color:var(--brand)}
@@ -503,42 +478,28 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 
 /* TIER TABS */
 .ttabs{padding:10px 18px 0;border-bottom:1px solid var(--b1);display:flex;gap:3px;overflow-x:auto;flex-shrink:0;background:var(--s2)}
-.ttab{
-  padding:5px 11px;border-radius:6px 6px 0 0;border:1px solid transparent;
-  font-size:11px;font-family:var(--fm);cursor:pointer;transition:all .15s;
-  background:transparent;color:var(--t3);white-space:nowrap;border-bottom:none;
-}
+.ttab{padding:5px 11px;border-radius:6px 6px 0 0;border:1px solid transparent;font-size:11px;font-family:var(--fm);cursor:pointer;transition:all .15s;background:transparent;color:var(--t3);white-space:nowrap;border-bottom:none;}
 .ttab:hover{color:var(--t2)}
 .ttab.on{background:var(--s1);border-color:var(--b1);color:var(--text);margin-bottom:-1px;padding-bottom:6px}
-
 .det-body{flex:1;overflow-y:auto;padding:14px 18px;background:var(--bg)}
 
 /* PRICE TABLE */
 .ptw{border-radius:7px;border:1px solid var(--b1);overflow:hidden;margin-bottom:16px;background:var(--s1)}
 .pt{width:100%;border-collapse:collapse;font-family:var(--fm);font-size:11px}
-.pt th{
-  padding:7px 11px;text-align:left;font-size:9px;text-transform:uppercase;
-  letter-spacing:.07em;color:var(--t3);background:var(--s2);
-  border-bottom:1px solid var(--b1);white-space:nowrap;
-}
+.pt th{padding:7px 11px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--t3);background:var(--s2);border-bottom:1px solid var(--b1);white-space:nowrap;}
 .pt th.r{text-align:right}
 .pt td{padding:7px 11px;border-bottom:1px solid var(--b1);vertical-align:middle}
 .pt tr:last-child td{border-bottom:none}
 .pt tbody tr:hover td{background:var(--s2)}
 .pt td.r{text-align:right}
-
-/* Price cells */
 .pc-ws{color:var(--ws);font-weight:500}
 .pc-above{color:var(--above)}
 .pc-below{color:var(--below)}
 .pc-qty{color:var(--text)}
-
-/* % badges — only in detail panel */
 .pct{display:inline-block;font-size:9px;padding:1px 4px;border-radius:3px;margin-left:4px;vertical-align:middle;font-family:var(--fm)}
 .pct-up{background:var(--above-bg);color:var(--above)}
 .pct-ws{background:var(--ws-bg);color:var(--ws)}
 .pct-down{background:var(--below-bg);color:var(--below)}
-
 .msec{margin-bottom:18px}
 .msec-hdr{font-family:var(--fd);font-weight:600;font-size:11px;color:var(--t2);display:flex;align-items:center;gap:7px;margin-bottom:7px}
 .msec-hdr::after{content:'';flex:1;height:1px;background:var(--b1)}
@@ -553,27 +514,15 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 
 /* ── SHEET VIEW ── */
 .sheet{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.sheet-bar{
-  padding:9px 14px;border-bottom:1px solid var(--b1);background:var(--s1);
-  display:flex;align-items:center;gap:9px;flex-shrink:0;flex-wrap:wrap;
-  box-shadow:0 1px 0 var(--b1);
-}
+.sheet-bar{padding:9px 14px;border-bottom:1px solid var(--b1);background:var(--s1);display:flex;align-items:center;gap:9px;flex-shrink:0;flex-wrap:wrap;box-shadow:0 1px 0 var(--b1);}
 .tier-pills{display:flex;gap:4px;flex-wrap:wrap}
-.tier-pill{
-  padding:4px 11px;border-radius:20px;border:1px solid var(--b2);
-  font-size:11px;font-family:var(--fm);cursor:pointer;background:transparent;
-  color:var(--t3);transition:all .15s;white-space:nowrap;
-}
+.tier-pill{padding:4px 11px;border-radius:20px;border:1px solid var(--b2);font-size:11px;font-family:var(--fm);cursor:pointer;background:transparent;color:var(--t3);transition:all .15s;white-space:nowrap;}
 .tier-pill:hover{color:var(--t2);background:var(--s3)}
 .sheet-cnt{font-family:var(--fm);font-size:10px;color:var(--t3);margin-left:auto;white-space:nowrap}
 .sheet-cnt span{color:var(--brand);font-weight:500}
 .sheet-wrap{flex:1;overflow:auto;background:var(--bg)}
 .st{border-collapse:collapse;font-family:var(--fm);font-size:11px;white-space:nowrap;width:auto}
-.st th{
-  padding:7px 12px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.07em;
-  color:var(--t3);background:var(--s1);border-bottom:2px solid var(--b2);
-  position:sticky;top:0;z-index:10;
-}
+.st th{padding:7px 12px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--t3);background:var(--s1);border-bottom:2px solid var(--b2);position:sticky;top:0;z-index:10;}
 .st th.r{text-align:right}
 .st td{padding:7px 12px;border-bottom:1px solid var(--b1);vertical-align:middle;background:var(--s1)}
 .st td.r{text-align:right}
@@ -583,30 +532,16 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .s-sku{font-size:9px;color:var(--t3)}
 .s-price-base{color:var(--text);font-weight:500}
 .s-price-qty{color:var(--t2)}
-.cat-hdr td{
-  padding:5px 12px;background:var(--s3);border-bottom:1px solid var(--b2);border-top:1px solid var(--b2);
-  font-family:var(--fd);font-size:9px;color:var(--brand);font-weight:700;letter-spacing:.1em;
-  text-transform:uppercase;
-}
+.cat-hdr td{padding:5px 12px;background:var(--s3);border-bottom:1px solid var(--b2);border-top:1px solid var(--b2);font-family:var(--fd);font-size:9px;color:var(--brand);font-weight:700;letter-spacing:.1em;text-transform:uppercase;}
 
 /* ── CUSTOMER VIEW ── */
 .custv{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.cust-bar{
-  padding:9px 14px;border-bottom:1px solid var(--b1);background:var(--s1);
-  display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;
-}
-.cust-sel{
-  padding:6px 12px;border-radius:6px;border:1px solid var(--b2);background:var(--s2);
-  color:var(--text);font-family:var(--fm);font-size:12px;outline:none;cursor:pointer;
-}
+.cust-bar{padding:9px 14px;border-bottom:1px solid var(--b1);background:var(--s1);display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;}
+.cust-sel{padding:6px 12px;border-radius:6px;border:1px solid var(--b2);background:var(--s2);color:var(--text);font-family:var(--fm);font-size:12px;outline:none;cursor:pointer;}
 .cust-sel option{background:var(--s2)}
 .cust-wrap{flex:1;overflow:auto;background:var(--bg)}
 .ct{border-collapse:collapse;font-family:var(--fm);font-size:11px;min-width:100%;white-space:nowrap}
-.ct th{
-  padding:7px 12px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.07em;
-  color:var(--t3);background:var(--s1);border-bottom:2px solid var(--b2);
-  position:sticky;top:0;z-index:10;
-}
+.ct th{padding:7px 12px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--t3);background:var(--s1);border-bottom:2px solid var(--b2);position:sticky;top:0;z-index:10;}
 .ct th.r{text-align:right}
 .ct td{padding:7px 12px;border-bottom:1px solid var(--b1);vertical-align:middle;background:var(--s1)}
 .ct td.r{text-align:right;font-family:var(--fm)}
@@ -617,37 +552,38 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .c-price-nil{color:var(--t4)}
 
 /* ── AUTH GATE ── */
-.auth-wrap{
-  flex:1;display:flex;align-items:center;justify-content:center;
-  background:radial-gradient(ellipse at 50% 40%, var(--brand-dim) 0%, transparent 60%);
-}
-.auth-card{
-  width:360px;background:var(--s1);border:1px solid var(--b2);border-radius:12px;
-  padding:32px;display:flex;flex-direction:column;align-items:center;gap:16px;
-  box-shadow:var(--shadow);
-}
-.auth-logo{
-  width:48px;height:48px;border-radius:10px;
-  background:var(--brand);
-  display:flex;align-items:center;justify-content:center;
-  font-family:var(--fd);font-weight:800;font-size:20px;color:#fff;
-}
+.auth-wrap{flex:1;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 40%, var(--brand-dim) 0%, transparent 60%);}
+.auth-card{width:360px;background:var(--s1);border:1px solid var(--b2);border-radius:12px;padding:32px;display:flex;flex-direction:column;align-items:center;gap:14px;box-shadow:var(--shadow);}
+.auth-logo{width:52px;height:52px;border-radius:10px;background:var(--brand);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
+.auth-logo img{width:52px;height:52px;object-fit:contain;mix-blend-mode:multiply;}
+.dark .auth-logo img{mix-blend-mode:normal;opacity:.85;}
+.auth-logo-fallback{font-family:var(--fd);font-weight:800;font-size:22px;color:#fff;}
 .auth-title{font-family:var(--fd);font-weight:700;font-size:20px;text-align:center;color:var(--text)}
 .auth-sub{font-size:12px;color:var(--t2);text-align:center;line-height:1.6;max-width:260px}
-.auth-select-lbl{font-family:var(--fm);font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.1em;align-self:flex-start}
-.auth-select{
-  width:100%;padding:9px 12px;background:var(--s2);border:1px solid var(--b2);
-  border-radius:7px;color:var(--text);font-family:var(--fm);font-size:12px;outline:none;cursor:pointer;
-}
-.auth-select option{background:var(--s2)}
-.auth-btn{
-  width:100%;padding:11px;border-radius:7px;border:none;
-  background:var(--brand);
-  color:#fff;font-family:var(--fd);font-weight:700;font-size:14px;cursor:pointer;
-  transition:opacity .2s,background .2s;
-}
-.auth-btn:hover{background:var(--brand-lt)}
-.auth-note{font-size:10px;font-family:var(--fm);color:var(--t3);text-align:center;line-height:1.5}
+.auth-mode-lbl{font-family:var(--fm);font-size:10px;color:var(--brand);text-transform:uppercase;letter-spacing:.1em;}
+.auth-form{width:100%;display:flex;flex-direction:column;gap:10px;}
+.auth-field{display:flex;flex-direction:column;gap:4px;}
+.auth-label{font-family:var(--fm);font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;}
+.auth-input{width:100%;padding:9px 12px;background:var(--s2);border:1px solid var(--b2);border-radius:7px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;transition:border-color .2s;}
+.auth-input:focus{border-color:var(--brand);}
+.auth-input::placeholder{color:var(--t3)}
+.auth-btn{width:100%;padding:11px;border-radius:7px;border:none;background:var(--brand);color:#fff;font-family:var(--fd);font-weight:700;font-size:14px;cursor:pointer;transition:background .2s;display:flex;align-items:center;justify-content:center;gap:8px;}
+.auth-btn:hover:not(:disabled){background:var(--brand-lt)}
+.auth-btn:disabled{opacity:.6;cursor:not-allowed}
+.auth-btn-spinner{width:14px;height:14px;border-radius:50%;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;animation:spin .6s linear infinite;flex-shrink:0;}
+.auth-err{width:100%;padding:8px 12px;border-radius:6px;background:var(--err-bg);border:1px solid rgba(201,64,64,.2);color:var(--err);font-size:12px;font-family:var(--fb);}
+.auth-success{width:100%;padding:8px 12px;border-radius:6px;background:var(--brand-dim);border:1px solid rgba(72,147,103,.25);color:var(--brand);font-size:12px;font-family:var(--fb);}
+.auth-switch{display:flex;justify-content:center;margin-top:2px;}
+.auth-link{background:none;border:none;color:var(--t2);font-size:12px;font-family:var(--fb);cursor:pointer;text-decoration:underline;text-underline-offset:3px;transition:color .15s;}
+.auth-link:hover{color:var(--brand)}
+
+/* ── LOADING / ERROR STATES ── */
+.loading-wrap{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;}
+.spinner{width:36px;height:36px;border-radius:50%;border:3px solid var(--b2);border-top-color:var(--brand);animation:spin .7s linear infinite;}
+
+/* ── BADGE PILLS ── */
+.badge-soon{font-size:8px;font-family:var(--fm);padding:1px 5px;border-radius:3px;background:var(--gold-bg);color:var(--gold);border:1px solid rgba(138,104,0,.2);margin-left:5px;white-space:nowrap;}
+.badge-wip{font-size:8px;font-family:var(--fm);padding:1px 5px;border-radius:3px;background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.25);margin-left:5px;white-space:nowrap;}
 
 /* ── SCROLLBARS ── */
 ::-webkit-scrollbar{width:7px;height:7px}
@@ -657,6 +593,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 
 .fade{animation:fi .15s ease}
 @keyframes fi{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 @media print{
   .topbar,.sidebar,.det-acts,.det-close,.ttabs,.calc,.auth-wrap,.theme-btn{display:none!important}
@@ -667,14 +604,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .pt th,.pt td{border-color:#ddd!important}
   .pc-ws,.pc-above,.pc-below,.pc-qty{color:#000!important}
   .pct{display:none!important}
-  /* Customer PDF */
-  .cust-bar{display:none!important}
+  .cust-bar,.demo-banner{display:none!important}
   .custv{display:block!important;height:auto!important}
   .cust-wrap{overflow:visible!important;height:auto!important}
   .ct th,.ct td{border-color:#ddd!important;color:#000!important;background:#fff!important}
   .cat-hdr td{background:#f0f0f0!important;color:#333!important}
   .no-print{display:none!important}
-  .cust-wrap td span[style]{color:#000!important}
   .print-cust-hdr{display:block!important}
 }
 .print-cust-hdr{display:none;padding:0 0 18px 0}
@@ -691,11 +626,245 @@ function PctBadge({ price, wsPrice }) {
   return <span className={`pct ${p > 0 ? "pct-up" : "pct-down"}`}>{fmtP(p)}</span>;
 }
 
+// ─── LOGO COMPONENT ───────────────────────────────────────────────────────────
+const LOGO_URL = "https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png";
+
+function LogoImg({ size = 30, className = "logo" }) {
+  const [err, setErr] = useState(false);
+  return (
+    <div className={className} style={size !== 30 ? { width: size, height: size } : {}}>
+      {!err
+        ? <img src={LOGO_URL} alt="Patio Products" onError={() => setErr(true)} />
+        : <span className={className === "auth-logo" ? "auth-logo-fallback" : "logo-fallback"}>W</span>
+      }
+    </div>
+  );
+}
+
+// ─── AUTH GATE ────────────────────────────────────────────────────────────────
+// Modes:
+//   "login"       — email + password
+//   "reset"       — enter email to receive reset link
+//   "set_pass"    — set a new password (after invite or recovery link)
+//   "reset_sent"  — confirmation screen after sending reset email
+
+function AuthGate({ onLogin, dark, setDark }) {
+  const [mode,      setMode]      = useState("login");
+  const [hashToken, setHashToken] = useState(null);
+  const [tokenType, setTokenType] = useState(null); // "invite" | "recovery"
+  const [email,     setEmail]     = useState("");
+  const [password,  setPassword]  = useState("");
+  const [password2, setPassword2] = useState("");
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+
+  // Detect invite_token or recovery_token in URL hash on mount
+  useEffect(() => {
+    const hash = window.location.hash.slice(1);
+    const params = new URLSearchParams(hash);
+    const inv = params.get("invite_token");
+    const rec = params.get("recovery_token");
+    if (inv) {
+      setHashToken(inv);
+      setTokenType("invite");
+      setMode("set_pass");
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    } else if (rec) {
+      setHashToken(rec);
+      setTokenType("recovery");
+      setMode("set_pass");
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  }, []);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    if (!email || !password) { setError("Please enter your email and password."); return; }
+    setLoading(true); setError("");
+    try {
+      const res = await fetch(`${GOTRUE_BASE}/token?grant_type=password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error_description || data.msg || "Login failed. Check your email and password.");
+      } else {
+        saveSession(data);
+        const user = extractUserFromToken(data);
+        if (user) onLogin(user);
+        else setError("Login succeeded but could not read user data. Please contact your administrator.");
+      }
+    } catch {
+      setError("Network error — please check your connection and try again.");
+    }
+    setLoading(false);
+  }
+
+  async function handleResetRequest(e) {
+    e.preventDefault();
+    if (!email) { setError("Please enter your email address."); return; }
+    setLoading(true); setError("");
+    try {
+      await fetch(`${GOTRUE_BASE}/recover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      // GoTrue returns 200 even for unknown emails (security by design)
+      setMode("reset_sent");
+    } catch {
+      setError("Network error — please try again.");
+    }
+    setLoading(false);
+  }
+
+  async function handleSetPassword(e) {
+    e.preventDefault();
+    if (!password) { setError("Please enter a new password."); return; }
+    if (password !== password2) { setError("Passwords don't match."); return; }
+    if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
+    setLoading(true); setError("");
+    try {
+      const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: tokenType === "invite" ? "signup" : "recovery",
+          token: hashToken,
+          password,
+        }),
+      });
+      const verifyData = await verifyRes.json();
+      if (!verifyRes.ok) {
+        setError(verifyData.error_description || verifyData.msg || "Token is invalid or expired. Please request a new link.");
+        setLoading(false); return;
+      }
+      saveSession(verifyData);
+      const user = extractUserFromToken(verifyData);
+      if (user) onLogin(user);
+      else setError("Password set, but could not read your account. Please try logging in.");
+    } catch {
+      setError("Network error — please try again.");
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div className="auth-wrap fade">
+      <div className="auth-card">
+        <LogoImg size={52} className="auth-logo" />
+        <div className="auth-title">PriceMatrix</div>
+
+        {mode === "login" && (
+          <>
+            <p className="auth-sub">Sign in with your company account to access pricing.</p>
+            <form className="auth-form" onSubmit={handleLogin}>
+              {error && <div className="auth-err">{error}</div>}
+              <div className="auth-field">
+                <label className="auth-label">Email</label>
+                <input className="auth-input" type="email" placeholder="you@patioproducts.com"
+                  value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" autoFocus />
+              </div>
+              <div className="auth-field">
+                <label className="auth-label">Password</label>
+                <input className="auth-input" type="password" placeholder="••••••••"
+                  value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" />
+              </div>
+              <button className="auth-btn" type="submit" disabled={loading}>
+                {loading && <span className="auth-btn-spinner" />}
+                {loading ? "Signing in…" : "Sign In"}
+              </button>
+              <div className="auth-switch">
+                <button type="button" className="auth-link"
+                  onClick={() => { setMode("reset"); setError(""); }}>
+                  Forgot password?
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+
+        {mode === "reset" && (
+          <>
+            <p className="auth-sub">Enter your email and we'll send you a password reset link.</p>
+            <form className="auth-form" onSubmit={handleResetRequest}>
+              {error && <div className="auth-err">{error}</div>}
+              <div className="auth-field">
+                <label className="auth-label">Email</label>
+                <input className="auth-input" type="email" placeholder="you@patioproducts.com"
+                  value={email} onChange={e => setEmail(e.target.value)} autoFocus />
+              </div>
+              <button className="auth-btn" type="submit" disabled={loading}>
+                {loading && <span className="auth-btn-spinner" />}
+                {loading ? "Sending…" : "Send Reset Link"}
+              </button>
+              <div className="auth-switch">
+                <button type="button" className="auth-link"
+                  onClick={() => { setMode("login"); setError(""); }}>
+                  ← Back to sign in
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+
+        {mode === "reset_sent" && (
+          <>
+            <p className="auth-sub">Check your email — if an account exists for that address, a reset link is on its way.</p>
+            <div className="auth-success">Reset link sent. Follow the link in the email to set a new password.</div>
+            <div className="auth-switch" style={{ marginTop: 8 }}>
+              <button type="button" className="auth-link"
+                onClick={() => { setMode("login"); setError(""); setEmail(""); setPassword(""); }}>
+                ← Back to sign in
+              </button>
+            </div>
+          </>
+        )}
+
+        {mode === "set_pass" && (
+          <>
+            <div className="auth-mode-lbl">{tokenType === "invite" ? "Accept invite" : "Reset password"}</div>
+            <p className="auth-sub">
+              {tokenType === "invite"
+                ? "Welcome! Set a password to activate your account."
+                : "Choose a new password for your account."}
+            </p>
+            <form className="auth-form" onSubmit={handleSetPassword}>
+              {error && <div className="auth-err">{error}</div>}
+              <div className="auth-field">
+                <label className="auth-label">New Password</label>
+                <input className="auth-input" type="password" placeholder="8+ characters"
+                  value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="new-password" />
+              </div>
+              <div className="auth-field">
+                <label className="auth-label">Confirm Password</label>
+                <input className="auth-input" type="password" placeholder="Confirm password"
+                  value={password2} onChange={e => setPassword2(e.target.value)} autoComplete="new-password" />
+              </div>
+              <button className="auth-btn" type="submit" disabled={loading}>
+                {loading && <span className="auth-btn-spinner" />}
+                {loading ? "Setting password…" : tokenType === "invite" ? "Activate Account" : "Set New Password"}
+              </button>
+            </form>
+          </>
+        )}
+
+        <button className="theme-btn" style={{ marginTop: 8, alignSelf: "center" }}
+          onClick={() => setDark(d => !d)} title={dark ? "Light mode" : "Dark mode"}>
+          {dark ? "☀" : "◑"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── DETAIL PANEL ─────────────────────────────────────────────────────────────
 function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, caps }) {
-  const [selTier, setSelTier] = useState("All");
-  const [calcVar,  setCalcVar]  = useState(null);
-  const [calcQty,  setCalcQty]  = useState("");
+  const [selTier,     setSelTier]     = useState("All");
+  const [calcVar,     setCalcVar]     = useState(null);
+  const [calcQty,     setCalcQty]     = useState("");
   const [filterColor, setFilterColor] = useState("All");
   const [filterSize,  setFilterSize]  = useState("All");
 
@@ -753,10 +922,10 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
     const qb = applicable.length ? Math.max(...applicable) : 0;
     return prices[qb] ?? null;
   }
-  const qNum  = parseInt(calcQty) || 0;
-  const uPrice = qNum > 0 ? resolveCalcPrice(qNum) : null;
-  const uPriceRounded = uPrice != null ? Math.round(uPrice * 100) / 100 : null;
-  const tPrice = uPrice != null && qNum > 0 ? Math.round(uPrice * qNum * 100) / 100 : null;
+  const qNum           = parseInt(calcQty) || 0;
+  const uPrice         = qNum > 0 ? resolveCalcPrice(qNum) : null;
+  const uPriceRounded  = uPrice != null ? Math.round(uPrice * 100) / 100 : null;
+  const tPrice         = uPrice != null && qNum > 0 ? Math.round(uPrice * qNum * 100) / 100 : null;
 
   const tiersToShow = selTier === "All" ? visibleTiers : (visibleTiers.includes(selTier) ? [selTier] : visibleTiers);
 
@@ -772,6 +941,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
   function qtyBreaksSingleTier(childId, tier) {
     return Object.keys(matrix[childId]?.[tier] || {}).map(Number).filter(b => b !== 1).sort((a,b) => a - b);
   }
+
   function handleCSV() {
     const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
     downloadCSV(`${product.parent_sku}-prices.csv`,
@@ -802,7 +972,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
       {/* Actions */}
       <div className="det-acts">
         <button className="btn btn-a" onClick={()=>window.print()}>⊞ Print / PDF</button>
-        {caps.canExportCSV && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
+        {caps.canExportCSV  && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>}
         <span className="row-count">
           {allData.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier)).length} rows
@@ -824,6 +994,8 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
           </span>
         </div>
       )}
+
+      {/* Qty Calculator */}
       <div className="calc">
         <span className="calc-lbl">QTY CALC</span>
         <select className="calc-var" value={cvSku} onChange={e=>setCalcVar(e.target.value)}>
@@ -857,10 +1029,11 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
         {selTier !== "All" ? (
           /* Single tier: variants × qty breaks */
           visibleVariants.map(v => {
-            const breaks = qtyBreaksSingleTier(v.child_id, selTier);
+            const breaks  = qtyBreaksSingleTier(v.child_id, selTier);
             const isFocus = focusChildSku && v.child_sku === focusChildSku;
             return (
-              <div key={v.child_id} ref={isFocus ? focusRef : null} className="ptw" style={{marginBottom:12,outline: isFocus?"2px solid var(--brand)":"none",borderRadius:7}}>
+              <div key={v.child_id} ref={isFocus ? focusRef : null} className="ptw"
+                style={{marginBottom:12,outline:isFocus?"2px solid var(--brand)":"none",borderRadius:7}}>
                 <table className="pt">
                   <thead>
                     <tr>
@@ -901,10 +1074,11 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
         ) : (
           /* All tiers: one section per variant, dynamic breaks */
           visibleVariants.map(v => {
-            const breaks = qtyBreaksAllTiers(v.child_id);
+            const breaks  = qtyBreaksAllTiers(v.child_id);
             const isFocus = focusChildSku && v.child_sku === focusChildSku;
             return (
-              <div key={v.child_id} ref={isFocus ? focusRef : null} className="msec" style={{outline: isFocus?"2px solid var(--brand)":"none",borderRadius:7,padding: isFocus?4:0}}>
+              <div key={v.child_id} ref={isFocus ? focusRef : null} className="msec"
+                style={{outline:isFocus?"2px solid var(--brand)":"none",borderRadius:7,padding:isFocus?4:0}}>
                 <div className="msec-hdr">
                   {v.variant_name} <span className="vbadge">{v.child_sku}</span>
                 </div>
@@ -934,7 +1108,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
                                 <td key={q} className="r">
                                   {price != null ? (
                                     <>
-                                      <span style={{color: q===0 ? (isWs?"var(--ws)":TIER_COLORS[tier]) : "var(--text)"}}>{fmt(price)}</span>
+                                      <span style={{color:q===0?(isWs?"var(--ws)":TIER_COLORS[tier]):"var(--text)"}}>{fmt(price)}</span>
                                       {q===0 && !isWs && <PctBadge price={price} wsPrice={wsPrice}/>}
                                     </>
                                   ) : "—"}
@@ -980,7 +1154,7 @@ function SheetView({ category, visibleTiers, allData, caps }) {
   const color = TIER_COLORS[activeTier];
   let lastCat = null;
 
-  // Derive qty break columns from the FILTERED rows only (not all data), suppress break=1
+  // Derive qty break columns from the FILTERED rows only, suppress break=1
   const sheetBreaks = useMemo(() => {
     const breaks = new Set();
     rows.forEach(([,v]) => {
@@ -997,18 +1171,14 @@ function SheetView({ category, visibleTiers, allData, caps }) {
         <div className="tier-pills">
           {visibleTiers.map(t=>(
             <button key={t} className="tier-pill"
-              style={activeTier===t ? {
-                borderColor: TIER_COLORS[t],
-                color: TIER_COLORS[t],
-                background: `${TIER_COLORS[t]}18`,
-              } : {}}
+              style={activeTier===t ? {borderColor:TIER_COLORS[t],color:TIER_COLORS[t],background:`${TIER_COLORS[t]}18`} : {}}
               onClick={()=>setTier(t)}>{t}</button>
           ))}
         </div>
         <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
 
-        {/* Crosstab CSV — human readable */}
+        {/* Crosstab CSV */}
         {caps.canExportCSV && <button className="btn" onClick={()=>downloadCSV(
           `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
           ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
@@ -1018,9 +1188,9 @@ function SheetView({ category, visibleTiers, allData, caps }) {
         {/* JSON — normalized, machine readable */}
         {caps.canExportJSON && <button className="btn" onClick={()=>{
           const payload = rows.map(([sku,v])=>({
-            child_sku: sku, parent_sku: v.parent_sku, parent_name: v.parent_name,
-            variant_name: v.variant_name, category: v.category, tier: activeTier,
-            prices: Object.fromEntries(sheetBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
+            child_sku:sku, parent_sku:v.parent_sku, parent_name:v.parent_name,
+            variant_name:v.variant_name, category:v.category, tier:activeTier,
+            prices:Object.fromEntries(sheetBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
           }));
           const a = document.createElement("a");
           a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
@@ -1028,27 +1198,23 @@ function SheetView({ category, visibleTiers, allData, caps }) {
           a.click();
         }}>↓ JSON</button>}
 
-        {/* Sage 50 — parent SKU stub, admin only */}
-        {caps.canExportSage && <button className="btn" style={{
-          borderColor:"var(--gold)", color:"var(--gold)",
-          opacity:0.6, cursor:"not-allowed",
-          display:"flex", alignItems:"center", gap:5,
-        }} onClick={()=>{
-          const sageRows = buildSageExport(allData);
-          const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
-          downloadCSV(
-            `sage-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
-            ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
-            filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
-          );
-        }} title="Sage 50 price file export — item ID mapping in progress">
-          ↓ Export Sage 50 Price File
-          <span style={{
-            fontSize:8, padding:"1px 5px", borderRadius:3,
-            background:"var(--gold-bg)", color:"var(--gold)",
-            fontFamily:"var(--fm)", letterSpacing:".05em",
-          }}>IN PROGRESS</span>
-        </button>}
+        {/* Sage 50 — admin only, IN PROGRESS */}
+        {caps.canExportSage && (
+          <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)",opacity:0.6,cursor:"not-allowed",display:"flex",alignItems:"center",gap:5}}
+            onClick={()=>{
+              const sageRows = buildSageExport(allData);
+              const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
+              downloadCSV(
+                `sage-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
+                ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
+                filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
+              );
+            }}
+            title="Sage 50 price file export — item ID mapping in progress">
+            ↓ Export Sage 50 Price File
+            <span className="badge-wip">IN PROGRESS</span>
+          </button>
+        )}
       </div>
 
       <div className="sheet-wrap">
@@ -1058,7 +1224,7 @@ function SheetView({ category, visibleTiers, allData, caps }) {
               <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
               {sheetBreaks.map(q=>(
-                <th key={q} className="r" style={{color: q===0 ? color : undefined, width:"1px", whiteSpace:"nowrap"}}>
+                <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
                   {q===0?"Price":`${q}+`}
                 </th>
               ))}
@@ -1102,9 +1268,9 @@ function SheetView({ category, visibleTiers, allData, caps }) {
 
 // ─── CUSTOMER VIEW ────────────────────────────────────────────────────────────
 function CustomerView({ allData, caps }) {
-  const [custId,      setCustId]      = useState(MOCK_CUSTOMERS[0].id);
-  const [search,      setSearch]      = useState("");
-  const [category,    setCategory]    = useState("All");
+  const [custId,        setCustId]        = useState(MOCK_CUSTOMERS[0].id);
+  const [search,        setSearch]        = useState("");
+  const [category,      setCategory]      = useState("All");
   const [specialFilter, setSpecialFilter] = useState("all"); // "all" | "special" | "standard"
   const cust = MOCK_CUSTOMERS.find(c=>c.id===custId);
 
@@ -1124,32 +1290,45 @@ function CustomerView({ allData, caps }) {
 
   const rows = useMemo(()=>{
     const allVariants = [];
-    PRODUCTS_DEF.forEach((p, pi) => {
-      const parentId = 1000 + pi*10;
-      p.variants.forEach((variant, vi) => {
-        const childSku = `${p.sku}-${String(vi+1).padStart(3,"0")}`;
-        const prices = {};
-        custBreaks.forEach(qty => {
-          const { price, isSpecial } = resolveCustomerPrice(allData, cust, childSku, qty);
-          prices[qty] = { price, isSpecial };
-        });
-        allVariants.push({
-          child_sku: childSku, parent_sku: p.sku, parent_name: p.name,
-          variant_name: variant, category: p.cat,
-          hasSpecial: !!cust.special[childSku],
-          prices,
-        });
+    MOCK_CUSTOMERS.forEach(c => {
+      if (c.id !== custId) return;
+    });
+    // Build rows from real data products
+    const parentMap = new Map();
+    allData.forEach(r => {
+      if (!parentMap.has(r.parent_id)) parentMap.set(r.parent_id, {
+        parent_sku: r.parent_sku, parent_name: decodeEntities(r.parent_name), category: decodeEntities(r.category),
       });
     });
-    // Sort: special first, then by category, then by name
+    const variantMap = new Map();
+    allData.forEach(r => {
+      if (!variantMap.has(r.child_sku)) variantMap.set(r.child_sku, {
+        child_sku: r.child_sku, parent_sku: r.parent_sku,
+        parent_name: decodeEntities(r.parent_name), variant_name: decodeEntities(r.variant_name),
+        category: decodeEntities(r.category),
+      });
+    });
+
+    variantMap.forEach((v, childSku) => {
+      const prices = {};
+      custBreaks.forEach(qty => {
+        const { price, isSpecial } = resolveCustomerPrice(allData, cust, childSku, qty);
+        prices[qty] = { price, isSpecial };
+      });
+      allVariants.push({
+        ...v,
+        hasSpecial: !!cust.special[childSku],
+        prices,
+      });
+    });
+
     return allVariants.sort((a,b)=>{
       if(a.hasSpecial !== b.hasSpecial) return b.hasSpecial ? 1 : -1;
       if(a.category !== b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[cust, allData, custBreaks]);
+  },[cust, allData, custBreaks, custId]);
 
-  // Effective category — search resets category filter
   const effectiveCat = search ? "All" : category;
 
   const filtered = useMemo(()=>{
@@ -1164,25 +1343,20 @@ function CustomerView({ allData, caps }) {
   let lastCat = null;
   const today = new Date().toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
 
-  function handlePDF() { window.print(); }
-
   function handleCSV() {
     downloadCSV(
       `${cust.name.replace(/\s+/g,"-")}-prices.csv`,
       ["sku","product","variant","category",...custBreaks.map(q=>q===0?"price":`qty_${q}_plus`)],
-      filtered.map(r=>[
-        r.child_sku, r.parent_name, r.variant_name, r.category,
-        ...custBreaks.map(q=>r.prices[q]?.price??"")
-      ])
+      filtered.map(r=>[r.child_sku,r.parent_name,r.variant_name,r.category,...custBreaks.map(q=>r.prices[q]?.price??"")])
     );
   }
 
   function handleJSON() {
     const payload = filtered.map(r=>({
-      child_sku: r.child_sku, parent_sku: r.parent_sku,
-      parent_name: r.parent_name, variant_name: r.variant_name,
-      category: r.category, tier: cust.tier,
-      prices: Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
+      child_sku:r.child_sku, parent_sku:r.parent_sku,
+      parent_name:r.parent_name, variant_name:r.variant_name,
+      category:r.category, tier:cust.tier,
+      prices:Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
     }));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
@@ -1201,11 +1375,7 @@ function CustomerView({ allData, caps }) {
       </div>
 
       {/* Demo data banner */}
-      <div className="no-print" style={{
-        padding:"7px 14px",background:"var(--gold-bg)",borderBottom:"1px solid var(--b1)",
-        display:"flex",alignItems:"center",gap:8,
-        fontFamily:"var(--fm)",fontSize:10,color:"var(--gold)",
-      }}>
+      <div className="no-print" style={{padding:"7px 14px",background:"var(--gold-bg)",borderBottom:"1px solid var(--b1)",display:"flex",alignItems:"center",gap:8,fontFamily:"var(--fm)",fontSize:10,color:"var(--gold)"}}>
         ⚠ Demo data — customer-specific pricing not yet connected. This view shows the feature structure only.
       </div>
 
@@ -1215,22 +1385,17 @@ function CustomerView({ allData, caps }) {
           {MOCK_CUSTOMERS.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
 
-        {/* Tier badge — screen only */}
-        <span className="no-print" style={{
-          padding:"3px 10px",borderRadius:20,fontSize:10,fontFamily:"var(--fm)",
-          background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}40`,
-          whiteSpace:"nowrap",
-        }}>{cust.tier}</span>
+        <span className="no-print" style={{padding:"3px 10px",borderRadius:20,fontSize:10,fontFamily:"var(--fm)",background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}40`,whiteSpace:"nowrap"}}>
+          {cust.tier}
+        </span>
 
         <div className="divider no-print"/>
 
-        {/* Category filter */}
         <select className="cust-sel no-print" value={category} onChange={e=>setCategory(e.target.value)}>
           <option value="All">All Categories</option>
           {categories.map(c=><option key={c} value={c}>{c}</option>)}
         </select>
 
-        {/* Special filter */}
         <select className="cust-sel no-print" value={specialFilter} onChange={e=>setSpecialFilter(e.target.value)}>
           <option value="all">All Pricing</option>
           <option value="special">Special Only</option>
@@ -1238,11 +1403,9 @@ function CustomerView({ allData, caps }) {
         </select>
 
         <input className="inp no-print" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">
-          {filtered.length} variants
-        </span>
-        <button className="btn btn-a no-print" onClick={handlePDF}>⊞ Print / PDF</button>
-        {caps.canExportCSV && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
+        <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} variants</span>
+        <button className="btn btn-a no-print" onClick={()=>window.print()}>⊞ Print / PDF</button>
+        {caps.canExportCSV  && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportJSON && <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>}
       </div>
 
@@ -1280,7 +1443,7 @@ function CustomerView({ allData, caps }) {
                     return (
                       <td key={q} className="r" style={{whiteSpace:"nowrap"}}>
                         {price != null
-                          ? <span style={{color: q===0 ? (isSpecial?"var(--coral)":"var(--brand)") : isSpecial?"var(--coral)":"var(--text)"}}>{fmt(price)}</span>
+                          ? <span style={{color:q===0?(isSpecial?"var(--coral)":"var(--brand)"):isSpecial?"var(--coral)":"var(--text)"}}>{fmt(price)}</span>
                           : <span className="c-price-nil">—</span>}
                       </td>
                     );
@@ -1295,65 +1458,60 @@ function CustomerView({ allData, caps }) {
   );
 }
 
-// ─── AUTH GATE ────────────────────────────────────────────────────────────────
-function AuthGate({ onLogin }) {
-  const [sel, setSel] = useState(MOCK_USERS[0].id);
-  return (
-    <div className="auth-wrap fade">
-      <div className="auth-card">
-        <img
-          src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
-          alt="Patio Products"
-          className="logo-img"
-          style={{height:48,width:"auto",objectFit:"contain"}}
-          onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
-        />
-        <div className="auth-logo" style={{display:"none"}}>W</div>
-        <div className="auth-title">PriceMatrix</div>
-        <p className="auth-sub">Select your access level to continue.</p>
-        <select className="auth-select" value={sel} onChange={e=>setSel(e.target.value)}>
-          {MOCK_USERS.map(u=>(
-            <option key={u.id} value={u.id}>{u.role.charAt(0).toUpperCase()+u.role.slice(1)}</option>
-          ))}
-        </select>
-        <button className="auth-btn" onClick={()=>onLogin(MOCK_USERS.find(u=>u.id===sel))}>
-          Continue
-        </button>
-        <p className="auth-note">Training access · Secure login coming soon</p>
-      </div>
-    </div>
-  );
-}
-
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user,        setUser]       = useState(null);
-  const [dark,        setDark]       = useState(false);
-  const [showImages,  setShowImages] = useState(true);
-  const [view,        setView]       = useState("browse");
-  const [search,      setSearch]     = useState("");
-  const [category,    setCategory]   = useState("All");
-  const [sortBy,      setSortBy]     = useState("name");
-  const [selectedProd,setSelectedProd] = useState(null);
+  const [user,         setUser]        = useState(null);
+  const [dark,         setDark]        = useState(false);
+  const [showImages,   setShowImages]  = useState(true);
+  const [view,         setView]        = useState("browse");
+  const [search,       setSearch]      = useState("");
+  const [category,     setCategory]    = useState("All");
+  const [sortBy,       setSortBy]      = useState("name");
+  const [selectedProd, setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku] = useState(null);
 
   // ── LIVE DATA ──
-  const [allData,    setAllData]    = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [loadError,  setLoadError]  = useState(null);
+  const [allData,   setAllData]   = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [loadError, setLoadError] = useState(null);
 
+  // ── RESTORE SESSION on mount ──
   useEffect(() => {
-    fetch("/.netlify/functions/sheet-data")
-      .then(r => r.json())
-      .then(rows => {
-        setAllData(rows);
-        setLoading(false);
-      })
-      .catch(err => {
-        setLoadError(err.message);
-        setLoading(false);
-      });
+    const saved = loadSession();
+    if (saved) {
+      const u = extractUserFromToken(saved);
+      if (u && u.expiresAt > Date.now()) {
+        setUser(u);
+      } else {
+        clearSession();
+      }
+    }
   }, []);
+
+  // ── FETCH DATA after user is set ──
+  useEffect(() => {
+    if (!user) return;
+    setLoading(true);
+    setLoadError(null);
+    fetch("/.netlify/functions/sheet-data", {
+      headers: { Authorization: `Bearer ${user.accessToken}` },
+    })
+      .then(r => r.json())
+      .then(rows => { setAllData(rows); setLoading(false); })
+      .catch(err => { setLoadError(err.message); setLoading(false); });
+  }, [user]);
+
+  async function handleSignOut() {
+    try {
+      await fetch(`${GOTRUE_BASE}/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${user.accessToken}` },
+      });
+    } catch {} // best-effort
+    clearSession();
+    setUser(null);
+    setAllData([]);
+  }
 
   const caps = user ? getRoleCapabilities(user.role) : null;
 
@@ -1377,7 +1535,6 @@ export default function App() {
 
   const filtered = useMemo(()=>{
     let list = allProducts;
-    // Search is global — resets category filter
     const effectiveCat = search ? "All" : category;
     if(effectiveCat!=="All") list=list.filter(p=>p.category===effectiveCat);
     if(search){
@@ -1401,7 +1558,6 @@ export default function App() {
     if(search && filtered.length === 1) {
       const q = search.toLowerCase();
       setSelectedProd(filtered[0]);
-      // Find the matching child SKU
       const matchingSku = [...(childSkuMap[filtered[0].parent_id]||[])].find(sku=>sku.toLowerCase().includes(q));
       setFocusChildSku(matchingSku || null);
     } else if(!search) {
@@ -1413,43 +1569,41 @@ export default function App() {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
   }
 
+  // ── AUTH GATE ──
   if (!user) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
-      <AuthGate onLogin={u=>{ setUser(u); setView("browse"); }}/>
+      <AuthGate onLogin={u=>{ setUser(u); setView("browse"); }} dark={dark} setDark={setDark}/>
     </div>
   );
 
+  // ── LOADING ──
   if (loading) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
-      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}>
-        <img
-          src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
-          alt="Patio Products"
-          style={{height:48,width:"auto",objectFit:"contain",mixBlendMode:"multiply",opacity:.7}}
-          onError={e=>e.target.style.display="none"}
-        />
-        <div style={{
-          width:36,height:36,borderRadius:"50%",
-          border:"3px solid var(--b2)",borderTopColor:"var(--brand)",
-          animation:"spin .7s linear infinite",
-        }}/>
+      <div className="loading-wrap">
+        <LogoImg size={48} className="auth-logo" />
+        <div className="spinner"/>
         <div style={{textAlign:"center",display:"flex",flexDirection:"column",gap:4}}>
           <div style={{fontFamily:"var(--fd)",fontSize:15,color:"var(--text)"}}>Loading pricing data…</div>
           <div style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)"}}>Fetching from Google Sheets</div>
         </div>
       </div>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
+  // ── LOAD ERROR ──
   if (loadError) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
-      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"var(--coral)"}}>
-        <div style={{fontFamily:"var(--fd)",fontSize:18}}>Failed to load pricing data</div>
+      <div className="loading-wrap">
+        <div style={{fontFamily:"var(--fd)",fontSize:18,color:"var(--err)"}}>Failed to load pricing data</div>
         <div style={{fontFamily:"var(--fm)",fontSize:11,color:"var(--t3)"}}>{loadError}</div>
+        <button className="btn btn-a" onClick={()=>{ setLoading(true); setLoadError(null);
+          fetch("/.netlify/functions/sheet-data",{headers:{Authorization:`Bearer ${user.accessToken}`}})
+            .then(r=>r.json()).then(rows=>{setAllData(rows);setLoading(false);})
+            .catch(err=>{setLoadError(err.message);setLoading(false);});
+        }}>Retry</button>
       </div>
     </div>
   );
@@ -1462,14 +1616,7 @@ export default function App() {
 
       {/* TOPBAR */}
       <header className="topbar">
-        <img
-          src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
-          alt="Patio Products"
-          className="logo-img"
-          style={{height:32,width:"auto",objectFit:"contain",flexShrink:0}}
-          onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
-        />
-        <div className="logo" style={{display:"none"}}>W</div>
+        <LogoImg size={30} className="logo" />
         <span className="brand">PriceMatrix</span>
         <div className="divider"/>
         <nav className="nav">
@@ -1478,27 +1625,17 @@ export default function App() {
             <button className={`nav-btn ${view==="sheet"?"active":""}`} onClick={()=>setView("sheet")}>⋮ Sheet View</button>
           )}
           {caps.canViewCustomers && (
-            <button className={`nav-btn ${view==="customer"?"active cust-active":""}`} onClick={()=>setView("customer")}>👤 Customer View</button>
+            <button className={`nav-btn ${view==="customer"?"active":""}`} onClick={()=>setView("customer")}>👤 Customer View</button>
           )}
         </nav>
         <div className="topbar-end">
           {caps.canSync && (
-            <button
-              className="btn no-print"
-              title="Coming soon — will trigger n8n to pull latest pricing from the website"
-              style={{
-                opacity:0.5, cursor:"not-allowed",
-                borderColor:"var(--brand)", color:"var(--brand)",
-                fontSize:11, display:"flex", alignItems:"center", gap:5,
-              }}
+            <button className="btn no-print"
+              style={{opacity:0.5,cursor:"not-allowed",borderColor:"var(--brand)",color:"var(--brand)",fontSize:11,display:"flex",alignItems:"center",gap:5}}
               onClick={e=>e.preventDefault()}
-            >
+              title="Coming soon — will trigger n8n to pull latest pricing from the website">
               ↻ Update Prices from Website
-              <span style={{
-                fontSize:8, padding:"1px 5px", borderRadius:3,
-                background:"var(--brand-dim)", color:"var(--brand)",
-                fontFamily:"var(--fm)", letterSpacing:".05em",
-              }}>COMING SOON</span>
+              <span className="badge-soon">COMING SOON</span>
             </button>
           )}
           <button className="theme-btn" onClick={()=>setDark(d=>!d)} title={dark?"Switch to light mode":"Switch to dark mode"}>
@@ -1508,8 +1645,8 @@ export default function App() {
             style={!showImages?{color:"var(--t4)"}:{}}>
             ⊟
           </button>
-          <div className="user-chip" onClick={()=>setUser(null)} title="Click to sign out">
-            <div className="user-avatar">{user.name[0]}</div>
+          <div className="user-chip" onClick={handleSignOut} title="Click to sign out">
+            <div className="user-avatar">{user.name[0].toUpperCase()}</div>
             {user.name}
             <span className="role-badge">{user.role}</span>
           </div>
@@ -1560,7 +1697,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              {user.role==="admin"&&(
+              {user.role==="admin" && (
                 <p className="oem-note">OEM tier hidden.<br/>Replaced by customer‑specific pricing.</p>
               )}
             </div>
@@ -1583,14 +1720,10 @@ export default function App() {
                       onClick={()=>setSelectedProd(p)}>
                       {showImages && (
                         <div className="pcard-img-wrap">
-                          <img
-                            className="pcard-img"
-                            src={p.image_url}
-                            alt={p.parent_name}
-                            onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}
-                          />
+                          <img className="pcard-img" src={p.image_url} alt={p.parent_name}
+                            onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}/>
                           <div className="pcard-img-ph" style={{display:"none"}}>
-                            <span>{p.category[0]}</span>
+                            <span>{p.category?.[0]}</span>
                           </div>
                         </div>
                       )}
@@ -1610,7 +1743,9 @@ export default function App() {
               </div>
 
               {selectedProd ? (
-                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>{setSelectedProd(null);setFocusChildSku(null);}} allData={allData} focusChildSku={focusChildSku} caps={caps}/>
+                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers}
+                  onClose={()=>{setSelectedProd(null);setFocusChildSku(null);}}
+                  allData={allData} focusChildSku={focusChildSku} caps={caps}/>
               ) : (
                 <div className="detail" style={{display:"flex"}}>
                   <div className="nosel">
