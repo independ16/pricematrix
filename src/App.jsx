@@ -1,5 +1,9 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 
+// Capture any auth token from the URL hash immediately at module load,
+// before React or the router can strip it.
+const INITIAL_HASH = window.location.hash || "";
+
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const TIERS = ["Retail", "Commercial", "Wholesale", "Wholesale_L2", "Wholesale_L3"];
 const ALL_TIERS = [...TIERS, "OEM"];
@@ -1359,14 +1363,22 @@ export default function App() {
         setUser(toUser(ni.currentUser()));
         setAuthReady(true);
       } else {
-        ni.init();
-        // Auto-open widget if invite/recovery token is in the URL hash
-        if (window.location.hash && (
-          window.location.hash.includes("invite_token") ||
-          window.location.hash.includes("recovery_token") ||
-          window.location.hash.includes("confirmation_token")
+        // Restore hash if it was stripped before widget loaded
+        if (INITIAL_HASH && (
+          INITIAL_HASH.includes("invite_token") ||
+          INITIAL_HASH.includes("recovery_token") ||
+          INITIAL_HASH.includes("confirmation_token")
         )) {
-          setTimeout(() => ni.open(), 500);
+          window.location.hash = INITIAL_HASH;
+        }
+        ni.init();
+        // Auto-open widget for token flows
+        if (INITIAL_HASH && (
+          INITIAL_HASH.includes("invite_token") ||
+          INITIAL_HASH.includes("recovery_token") ||
+          INITIAL_HASH.includes("confirmation_token")
+        )) {
+          setTimeout(() => ni.open(), 800);
         }
       }
     }
