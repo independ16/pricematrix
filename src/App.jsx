@@ -21,35 +21,58 @@ const QTY_MULT  = { 0:1.0, 1:1.0, 5:0.97, 10:0.93, 25:0.88, 50:0.84, 100:0.80 };
 
 // ─── NETLIFY IDENTITY AUTH LAYER ──────────────────────────────────────────────
 // Role mapping:
-//   admin        → sees all tiers + customer view + sheet view
-//   manager      → sees all tiers + sheet view, no customer pricing
-//   commercial   → sees only Commercial tier
-//   wholesale    → sees Wholesale / Wholesale_L2 / Wholesale_L3
-//   retail       → sees only Retail tier
+//   admin    → everything: all tiers, all views, all exports, sync (when built)
+//   manager  → all tiers, Browse + Sheet + Customer View (read), crosstab CSV only
+//   viewer   → Browse + Sheet View only, no exports, no Customer View
 //
-// To deploy on Netlify:
-//   1. Enable Netlify Identity in your site dashboard
-//   2. Add netlify-identity-widget to your project: `npm i netlify-identity-widget`
-//   3. In index.html add: <script src="https://identity.netlify.com/v1/netlify-identity-widget.js"></script>
-//   4. In netlify.toml set roles via JWT claims or use the Identity dashboard to assign roles
-//   5. Uncomment the real NetlifyIdentity block below and remove MOCK_AUTH
+// User invitations: Netlify dashboard → Identity → Invite users (admin access only)
+// Role assignment: Identity dashboard → click user → Roles
 
-// MOCK AUTH — remove when deploying to Netlify
+// MOCK AUTH — replaced by Netlify Identity widget on deploy
 const MOCK_USERS = [
-  { id:"u1", email:"admin@example.com",      name:"Admin User",      role:"admin" },
-  { id:"u2", email:"manager@example.com",    name:"Sales Manager",   role:"manager" },
-  { id:"u3", email:"commercial@example.com", name:"Commercial Rep",  role:"commercial" },
-  { id:"u4", email:"wholesale@example.com",  name:"Wholesale Rep",   role:"wholesale" },
+  { id:"u1", email:"admin@example.com",   name:"Admin User",   role:"admin"   },
+  { id:"u2", email:"manager@example.com", name:"Sales Manager",role:"manager" },
+  { id:"u3", email:"viewer@example.com",  name:"Viewer",       role:"viewer"  },
 ];
 
 function getRoleCapabilities(role) {
   switch(role) {
-    case "admin":      return { tiers: TIERS, canViewCustomers: true,  canViewSheet: true,  canExport: true  };
-    case "manager":    return { tiers: TIERS, canViewCustomers: false, canViewSheet: true,  canExport: true  };
-    case "commercial": return { tiers: ["Commercial"],                  canViewCustomers: false, canViewSheet: true,  canExport: false };
-    case "wholesale":  return { tiers: ["Wholesale","Wholesale_L2","Wholesale_L3"], canViewCustomers: false, canViewSheet: true, canExport: false };
-    case "retail":     return { tiers: ["Retail"],                      canViewCustomers: false, canViewSheet: true,  canExport: false };
-    default:           return { tiers: [],                              canViewCustomers: false, canViewSheet: false, canExport: false };
+    case "admin":   return {
+      tiers: TIERS,
+      canViewCustomers: true,
+      canViewSheet: true,
+      canExportCSV: true,   // crosstab CSV
+      canExportJSON: true,  // JSON (machine readable)
+      canExportSage: true,  // Sage 50
+      canSync: true,        // trigger data sync (when built)
+    };
+    case "manager": return {
+      tiers: TIERS,
+      canViewCustomers: true,  // can see Customer View (demo data banner shown)
+      canViewSheet: true,
+      canExportCSV: true,      // crosstab CSV only
+      canExportJSON: false,
+      canExportSage: false,
+      canSync: false,
+    };
+    case "viewer":  return {
+      tiers: TIERS,
+      canViewCustomers: false,
+      canViewSheet: true,
+      canExportCSV: false,
+      canExportJSON: false,
+      canExportSage: false,
+      canSync: false,
+    };
+    default:        return {
+      tiers: [],
+      canViewCustomers: false,
+      canViewSheet: false,
+      canExportCSV: false,
+      canExportJSON: false,
+      canExportSage: false,
+      canSync: false,
+    };
   }
 }
 
@@ -663,7 +686,7 @@ function PctBadge({ price, wsPrice }) {
 }
 
 // ─── DETAIL PANEL ─────────────────────────────────────────────────────────────
-function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku }) {
+function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, caps }) {
   const [selTier, setSelTier] = useState("All");
   const [calcVar,  setCalcVar]  = useState(null);
   const [calcQty,  setCalcQty]  = useState("");
@@ -773,8 +796,8 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
       {/* Actions */}
       <div className="det-acts">
         <button className="btn btn-a" onClick={()=>window.print()}>⊞ Print / PDF</button>
-        <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>
-        <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>
+        {caps.canExportCSV && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
+        {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>}
         <span className="row-count">
           {allData.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier)).length} rows
         </span>
@@ -928,7 +951,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku })
 }
 
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
-function SheetView({ category, visibleTiers, allData }) {
+function SheetView({ category, visibleTiers, allData, caps }) {
   const [tier,   setTier]   = useState(visibleTiers[0] || "Wholesale");
   const [search, setSearch] = useState("");
   const activeTier = visibleTiers.includes(tier) ? tier : visibleTiers[0];
@@ -979,15 +1002,15 @@ function SheetView({ category, visibleTiers, allData }) {
         <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
 
-        {/* Crosstab CSV — human readable, qty breaks as columns */}
-        <button className="btn" onClick={()=>downloadCSV(
+        {/* Crosstab CSV — human readable */}
+        {caps.canExportCSV && <button className="btn" onClick={()=>downloadCSV(
           `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
           ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
           rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...sheetBreaks.map(q=>v[q]??"")])
-        )}>↓ CSV</button>
+        )}>↓ CSV</button>}
 
-        {/* JSON — normalized rows, machine readable */}
-        <button className="btn" onClick={()=>{
+        {/* JSON — normalized, machine readable */}
+        {caps.canExportJSON && <button className="btn" onClick={()=>{
           const payload = rows.map(([sku,v])=>({
             child_sku: sku, parent_sku: v.parent_sku, parent_name: v.parent_name,
             variant_name: v.variant_name, category: v.category, tier: activeTier,
@@ -997,10 +1020,10 @@ function SheetView({ category, visibleTiers, allData }) {
           a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
           a.download = `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.json`;
           a.click();
-        }}>↓ JSON</button>
+        }}>↓ JSON</button>}
 
-        {/* Sage 50 export — parent SKU + price levels 1/8/10 */}
-        <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)"}} onClick={()=>{
+        {/* Sage 50 — parent SKU stub, admin only */}
+        {caps.canExportSage && <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)"}} onClick={()=>{
           const sageRows = buildSageExport(allData);
           const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
           downloadCSV(
@@ -1008,7 +1031,7 @@ function SheetView({ category, visibleTiers, allData }) {
             ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
             filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
           );
-        }}>↓ Sage</button>
+        }}>↓ Sage</button>}
       </div>
 
       <div className="sheet-wrap">
@@ -1061,7 +1084,7 @@ function SheetView({ category, visibleTiers, allData }) {
 }
 
 // ─── CUSTOMER VIEW ────────────────────────────────────────────────────────────
-function CustomerView({ allData }) {
+function CustomerView({ allData, caps }) {
   const [custId,      setCustId]      = useState(MOCK_CUSTOMERS[0].id);
   const [search,      setSearch]      = useState("");
   const [category,    setCategory]    = useState("All");
@@ -1160,6 +1183,15 @@ function CustomerView({ allData }) {
         <p>Prepared {today} · Prices valid as of this date · Subject to change without notice</p>
       </div>
 
+      {/* Demo data banner */}
+      <div className="no-print" style={{
+        padding:"7px 14px",background:"var(--gold-bg)",borderBottom:"1px solid var(--b1)",
+        display:"flex",alignItems:"center",gap:8,
+        fontFamily:"var(--fm)",fontSize:10,color:"var(--gold)",
+      }}>
+        ⚠ Demo data — customer-specific pricing not yet connected. This view shows the feature structure only.
+      </div>
+
       <div className="cust-bar">
         <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Customer</span>
         <select className="cust-sel" value={custId} onChange={e=>{ setCustId(e.target.value); setSearch(""); setCategory("All"); setSpecialFilter("all"); }}>
@@ -1193,8 +1225,8 @@ function CustomerView({ allData }) {
           {filtered.length} variants
         </span>
         <button className="btn btn-a no-print" onClick={handlePDF}>⊞ Print / PDF</button>
-        <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>
-        <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>
+        {caps.canExportCSV && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
+        {caps.canExportJSON && <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>}
       </div>
 
       <div className="cust-wrap">
@@ -1247,11 +1279,9 @@ function CustomerView({ allData }) {
 }
 
 // ─── AUTH GATE ────────────────────────────────────────────────────────────────
-// In production this is replaced by Netlify Identity widget.
-// netlify-identity-widget calls window.netlifyIdentity.on("login", user => setUser(user))
-// User roles come from app_metadata.roles in the JWT.
-function AuthGate({ onLogin }) {
-  const [sel, setSel] = useState(MOCK_USERS[0].id);
+// Shown briefly while Netlify Identity initialises. Once the widget fires
+// its 'init' or 'login' event this component is never seen again.
+function AuthGate() {
   return (
     <div className="auth-wrap fade">
       <div className="auth-card">
@@ -1264,21 +1294,11 @@ function AuthGate({ onLogin }) {
         />
         <div className="auth-logo" style={{display:"none"}}>W</div>
         <div className="auth-title">PriceMatrix</div>
-        <p className="auth-sub">Sign in with your company account to view pricing. Access is restricted by role.</p>
-        <span className="auth-select-lbl">Sign in as (demo)</span>
-        <select className="auth-select" value={sel} onChange={e=>setSel(e.target.value)}>
-          {MOCK_USERS.map(u=>(
-            <option key={u.id} value={u.id}>{u.name} — {u.role}</option>
-          ))}
-        </select>
-        <button className="auth-btn" onClick={()=>onLogin(MOCK_USERS.find(u=>u.id===sel))}>
+        <p className="auth-sub">Sign in with your Patio Products account to access pricing.</p>
+        <button className="auth-btn" onClick={()=>window.netlifyIdentity?.open()}>
           Sign In
         </button>
-        <p className="auth-note">
-          Production: uses Netlify Identity.<br/>
-          Invite users at: Site settings → Identity → Invite users.<br/>
-          Assign roles via Identity dashboard or JWT claims.
-        </p>
+        <p className="auth-note">Access is restricted by role. Contact your administrator if you need an invitation.</p>
       </div>
     </div>
   );
@@ -1287,6 +1307,7 @@ function AuthGate({ onLogin }) {
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [user,        setUser]       = useState(null);
+  const [authReady,   setAuthReady]  = useState(false);
   const [dark,        setDark]       = useState(false);
   const [showImages,  setShowImages] = useState(true);
   const [view,        setView]       = useState("browse");
@@ -1295,6 +1316,31 @@ export default function App() {
   const [sortBy,      setSortBy]     = useState("name");
   const [selectedProd,setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku] = useState(null);
+
+  // ── NETLIFY IDENTITY ──
+  useEffect(() => {
+    const ni = window.netlifyIdentity;
+    if (!ni) { setAuthReady(true); return; } // widget not loaded — dev fallback
+
+    function toUser(u) {
+      const role = u?.app_metadata?.roles?.[0] ?? "viewer";
+      return { id: u.id, name: u.user_metadata?.full_name ?? u.email, email: u.email, role };
+    }
+
+    ni.on("init", u => {
+      if (u) setUser(toUser(u));
+      setAuthReady(true);
+    });
+    ni.on("login", u => {
+      setUser(toUser(u));
+      setView("browse");
+      ni.close();
+    });
+    ni.on("logout", () => setUser(null));
+    ni.init();
+
+    return () => { ni.off("init"); ni.off("login"); ni.off("logout"); };
+  }, []);
 
   // ── LIVE DATA ──
   const [allData,    setAllData]    = useState([]);
@@ -1372,10 +1418,19 @@ export default function App() {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
   }
 
+  if (!authReady) return (
+    <div className={`app${dark?" dark":""}`}>
+      <style>{CSS}</style>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--t3)"}}>
+        <div style={{fontFamily:"var(--fd)",fontSize:16}}>Loading…</div>
+      </div>
+    </div>
+  );
+
   if (!user) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
-      <AuthGate onLogin={u=>{ setUser(u); setView("browse"); }}/>
+      <AuthGate/>
     </div>
   );
 
@@ -1434,7 +1489,7 @@ export default function App() {
             style={!showImages?{color:"var(--t4)"}:{}}>
             ⊟
           </button>
-          <div className="user-chip" onClick={()=>setUser(null)} title="Click to sign out">
+          <div className="user-chip" onClick={()=>window.netlifyIdentity?.logout()} title="Click to sign out">
             <div className="user-avatar">{user.name[0]}</div>
             {user.name}
             <span className="role-badge">{user.role}</span>
@@ -1536,7 +1591,7 @@ export default function App() {
               </div>
 
               {selectedProd ? (
-                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>{setSelectedProd(null);setFocusChildSku(null);}} allData={allData} focusChildSku={focusChildSku}/>
+                <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers} onClose={()=>{setSelectedProd(null);setFocusChildSku(null);}} allData={allData} focusChildSku={focusChildSku} caps={caps}/>
               ) : (
                 <div className="detail" style={{display:"flex"}}>
                   <div className="nosel">
@@ -1551,12 +1606,12 @@ export default function App() {
 
           {/* SHEET VIEW */}
           {view==="sheet" && caps.canViewSheet && (
-            <SheetView category={category} visibleTiers={caps.tiers} allData={allData}/>
+            <SheetView category={category} visibleTiers={caps.tiers} allData={allData} caps={caps}/>
           )}
 
           {/* CUSTOMER VIEW */}
           {view==="customer" && caps.canViewCustomers && (
-            <CustomerView allData={allData}/>
+            <CustomerView allData={allData} caps={caps}/>
           )}
         </div>
       </div>
