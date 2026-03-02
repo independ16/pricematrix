@@ -1023,7 +1023,11 @@ function SheetView({ category, visibleTiers, allData, caps }) {
         }}>↓ JSON</button>}
 
         {/* Sage 50 — parent SKU stub, admin only */}
-        {caps.canExportSage && <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)"}} onClick={()=>{
+        {caps.canExportSage && <button className="btn" style={{
+          borderColor:"var(--gold)", color:"var(--gold)",
+          opacity:0.6, cursor:"not-allowed",
+          display:"flex", alignItems:"center", gap:5,
+        }} onClick={()=>{
           const sageRows = buildSageExport(allData);
           const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
           downloadCSV(
@@ -1031,7 +1035,14 @@ function SheetView({ category, visibleTiers, allData, caps }) {
             ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
             filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
           );
-        }}>↓ Sage</button>}
+        }} title="Sage 50 price file export — item ID mapping in progress">
+          ↓ Export Sage 50 Price File
+          <span style={{
+            fontSize:8, padding:"1px 5px", borderRadius:3,
+            background:"var(--gold-bg)", color:"var(--gold)",
+            fontFamily:"var(--fm)", letterSpacing:".05em",
+          }}>IN PROGRESS</span>
+        </button>}
       </div>
 
       <div className="sheet-wrap">
@@ -1471,10 +1482,24 @@ export default function App() {
   if (loading) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
-      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,color:"var(--t3)"}}>
-        <div style={{fontFamily:"var(--fd)",fontSize:18}}>Loading pricing data…</div>
-        <div style={{fontFamily:"var(--fm)",fontSize:11}}>Fetching from Google Sheets</div>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}>
+        <img
+          src="https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png"
+          alt="Patio Products"
+          style={{height:48,width:"auto",objectFit:"contain",mixBlendMode:"multiply",opacity:.7}}
+          onError={e=>e.target.style.display="none"}
+        />
+        <div style={{
+          width:36,height:36,borderRadius:"50%",
+          border:"3px solid var(--b2)",borderTopColor:"var(--brand)",
+          animation:"spin .7s linear infinite",
+        }}/>
+        <div style={{textAlign:"center",display:"flex",flexDirection:"column",gap:4}}>
+          <div style={{fontFamily:"var(--fd)",fontSize:15,color:"var(--text)"}}>Loading pricing data…</div>
+          <div style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)"}}>Fetching from Google Sheets</div>
+        </div>
       </div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
@@ -1516,6 +1541,25 @@ export default function App() {
           )}
         </nav>
         <div className="topbar-end">
+          {caps.canSync && (
+            <button
+              className="btn no-print"
+              title="Coming soon — will trigger n8n to pull latest pricing from the website"
+              style={{
+                opacity:0.5, cursor:"not-allowed",
+                borderColor:"var(--brand)", color:"var(--brand)",
+                fontSize:11, display:"flex", alignItems:"center", gap:5,
+              }}
+              onClick={e=>e.preventDefault()}
+            >
+              ↻ Update Prices from Website
+              <span style={{
+                fontSize:8, padding:"1px 5px", borderRadius:3,
+                background:"var(--brand-dim)", color:"var(--brand)",
+                fontFamily:"var(--fm)", letterSpacing:".05em",
+              }}>COMING SOON</span>
+            </button>
+          )}
           <button className="theme-btn" onClick={()=>setDark(d=>!d)} title={dark?"Switch to light mode":"Switch to dark mode"}>
             {dark ? "☀" : "◑"}
           </button>
