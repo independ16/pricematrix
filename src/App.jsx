@@ -1370,16 +1370,9 @@ export default function App() {
           INITIAL_HASH.includes("confirmation_token")
         )) {
           window.location.hash = INITIAL_HASH;
+          // Widget handles the token itself — don't call open(), it will auto-trigger
         }
         ni.init();
-        // Auto-open widget for token flows
-        if (INITIAL_HASH && (
-          INITIAL_HASH.includes("invite_token") ||
-          INITIAL_HASH.includes("recovery_token") ||
-          INITIAL_HASH.includes("confirmation_token")
-        )) {
-          setTimeout(() => ni.open(), 800);
-        }
       }
     }
 
