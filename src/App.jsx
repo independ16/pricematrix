@@ -1349,6 +1349,14 @@ export default function App() {
         setAuthReady(true);
       } else {
         ni.init();
+        // Auto-open widget if invite/recovery token is in the URL hash
+        if (window.location.hash && (
+          window.location.hash.includes("invite_token") ||
+          window.location.hash.includes("recovery_token") ||
+          window.location.hash.includes("confirmation_token")
+        )) {
+          setTimeout(() => ni.open(), 500);
+        }
       }
     }
 
