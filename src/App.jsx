@@ -1319,27 +1319,42 @@ export default function App() {
 
   // ── NETLIFY IDENTITY ──
   useEffect(() => {
-    const ni = window.netlifyIdentity;
-    if (!ni) { setAuthReady(true); return; } // widget not loaded — dev fallback
-
-    function toUser(u) {
-      const role = u?.app_metadata?.roles?.[0] ?? "viewer";
-      return { id: u.id, name: u.user_metadata?.full_name ?? u.email, email: u.email, role };
+    // Load the Identity widget script programmatically (Vite strips it from index.html)
+    if (!window.netlifyIdentity) {
+      const script = document.createElement("script");
+      script.src = "https://identity.netlify.com/v1/netlify-identity-widget.js";
+      script.onload = () => initIdentity();
+      document.head.appendChild(script);
+    } else {
+      initIdentity();
     }
 
-    ni.on("init", u => {
-      if (u) setUser(toUser(u));
-      setAuthReady(true);
-    });
-    ni.on("login", u => {
-      setUser(toUser(u));
-      setView("browse");
-      ni.close();
-    });
-    ni.on("logout", () => setUser(null));
-    ni.init();
+    function initIdentity() {
+      const ni = window.netlifyIdentity;
+      if (!ni) { setAuthReady(true); return; }
 
-    return () => { ni.off("init"); ni.off("login"); ni.off("logout"); };
+      function toUser(u) {
+        const role = u?.app_metadata?.roles?.[0] ?? "viewer";
+        return { id: u.id, name: u.user_metadata?.full_name ?? u.email, email: u.email, role };
+      }
+
+      ni.on("init", u => {
+        if (u) setUser(toUser(u));
+        setAuthReady(true);
+      });
+      ni.on("login", u => {
+        setUser(toUser(u));
+        setView("browse");
+        ni.close();
+      });
+      ni.on("logout", () => setUser(null));
+      ni.init();
+    }
+
+    return () => {
+      const ni = window.netlifyIdentity;
+      if (ni) { ni.off("init"); ni.off("login"); ni.off("logout"); }
+    };
   }, []);
 
   // ── LIVE DATA ──
