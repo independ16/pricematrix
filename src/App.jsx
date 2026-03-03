@@ -728,7 +728,7 @@ function AuthGate({ onLogin, dark, setDark }) {
     if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
     setLoading(true); setError("");
     try {
-      // Step 1: verify the token and set the password
+      // Step 1: verify the token — this creates an authenticated session
       const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -744,24 +744,24 @@ function AuthGate({ onLogin, dark, setDark }) {
         setLoading(false); return;
       }
 
-      // Step 2: immediately do a fresh password login to commit the new password
-      // This ensures subsequent logins work — the verify token alone is one-time only
-      const verifiedEmail = verifyData.email || parseJwt(verifyData.access_token)?.email;
-      if (verifiedEmail) {
-        const loginRes = await fetch(`${GOTRUE_BASE}/token?grant_type=password`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: verifiedEmail, password }),
-        });
-        const loginData = await loginRes.json();
-        if (loginRes.ok) {
-          saveSession(loginData);
-          const user = extractUserFromToken(loginData);
-          if (user) { onLogin(user); return; }
-        }
+      // Step 2: use the verify session's access token to PUT /user and actually commit the password
+      // Without this step, /verify only creates a one-time session — the password isn't persisted
+      const accessToken = verifyData.access_token;
+      const putRes = await fetch(`${GOTRUE_BASE}/user`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ password }),
+      });
+      const putData = await putRes.json();
+      if (!putRes.ok) {
+        // PUT failed — fall back to the verify session and warn user
+        console.warn("PUT /user failed:", putData);
       }
 
-      // Fallback: use the verify token directly if fresh login fails
+      // Step 3: log the user in using the verify session
       saveSession(verifyData);
       const user = extractUserFromToken(verifyData);
       if (user) onLogin(user);
