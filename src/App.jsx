@@ -753,46 +753,58 @@ function AuthGate({ onLogin, dark, setDark }) {
     if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
     setLoading(true); setError("");
     try {
-      // Step 1: verify the token — this creates an authenticated session
-      const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: tokenType === "invite" ? "signup" : "recovery",
-          token: hashToken,
-          password,
-        }),
-      });
-      const verifyData = await verifyRes.json();
-      if (!verifyRes.ok) {
-        setError(verifyData.error_description || verifyData.msg || "Token is invalid or expired. Please request a new link.");
-        setLoading(false); return;
-      }
+      if (tokenType === "invite") {
+        // ── INVITE FLOW ──────────────────────────────────────────────────────
+        // GoTrue on Netlify does not reliably persist passwords set during
+        // /verify. Workaround: verify the invite to confirm the account, then
+        // immediately send a password recovery email. The user sets their real
+        // password via that link, which is known to persist correctly.
 
-      // Step 2: use the verify session's access token to PUT /user and actually commit the password
-      // Without this step, /verify only creates a one-time session — the password isn't persisted
-      const accessToken = verifyData.access_token;
-      const putRes = await fetch(`${GOTRUE_BASE}/user`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ password, data: {} }),
-      });
-      const putData = await putRes.json();
-      // Log full response so we can diagnose in Network/Console tab
-      console.log("PUT /user status:", putRes.status, "response:", JSON.stringify(putData));
-      if (!putRes.ok) {
-        // PUT failed — fall back to the verify session and warn user
-        console.warn("PUT /user failed:", putData);
-      }
+        // Step 1: verify invite token to activate the account (password param
+        // is sent but won't stick — that's expected, recovery email handles it)
+        const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "signup", token: hashToken, password }),
+        });
+        const verifyData = await verifyRes.json();
+        if (!verifyRes.ok) {
+          setError(verifyData.error_description || verifyData.msg || "Invite link is invalid or expired. Please contact your administrator.");
+          setLoading(false); return;
+        }
 
-      // Step 3: log the user in using the verify session
-      saveSession(verifyData);
-      const user = extractUserFromToken(verifyData);
-      if (user) onLogin(user);
-      else setError("Password set — please sign in with your new password.");
+        // Step 2: send recovery email so they can set a persistent password
+        // Use the email from the verified token payload
+        const payload = parseJwt(verifyData.access_token);
+        const userEmail = payload?.email || email;
+        await fetch(`${GOTRUE_BASE}/recover`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: userEmail }),
+        });
+
+        // Step 3: show "check your email" screen — do NOT log them in yet
+        setMode("invite_sent");
+
+      } else {
+        // ── RECOVERY FLOW ────────────────────────────────────────────────────
+        // Password reset via recovery token — this path works correctly as-is
+        const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "recovery", token: hashToken, password }),
+        });
+        const verifyData = await verifyRes.json();
+        if (!verifyRes.ok) {
+          setError(verifyData.error_description || verifyData.msg || "Token is invalid or expired. Please request a new link.");
+          setLoading(false); return;
+        }
+        // Log them straight in — recovery flow persists password correctly
+        saveSession(verifyData);
+        const user = extractUserFromToken(verifyData);
+        if (user) onLogin(user);
+        else setError("Password set — please sign in with your new password.");
+      }
     } catch {
       setError("Network error — please try again.");
     }
@@ -878,12 +890,25 @@ function AuthGate({ onLogin, dark, setDark }) {
           </>
         )}
 
+        {mode === "invite_sent" && (
+          <>
+            <div className="auth-mode-lbl">One more step</div>
+            <p className="auth-sub">Your account has been activated. We've sent a password setup link to your email.</p>
+            <div className="auth-success">
+              Check your inbox and click the link to set your password. Once done, you can sign in normally.
+            </div>
+            <div style={{fontSize:11,color:"var(--t3)",fontFamily:"var(--fm)",marginTop:12,textAlign:"center",lineHeight:1.5}}>
+              Didn't get the email? Check your spam folder,<br/>or contact your administrator for a new invite.
+            </div>
+          </>
+        )}
+
         {mode === "set_pass" && (
           <>
             <div className="auth-mode-lbl">{tokenType === "invite" ? "Accept invite" : "Reset password"}</div>
             <p className="auth-sub">
               {tokenType === "invite"
-                ? "Welcome! Set a password to activate your account."
+                ? "Enter a password to activate your account. You'll receive a confirmation email to finalize it."
                 : "Choose a new password for your account."}
             </p>
             <form className="auth-form" onSubmit={handleSetPassword}>
@@ -907,7 +932,9 @@ function AuthGate({ onLogin, dark, setDark }) {
               </div>
               <button className="auth-btn" type="submit" disabled={loading}>
                 {loading && <span className="auth-btn-spinner" />}
-                {loading ? "Setting password…" : tokenType === "invite" ? "Activate Account" : "Set New Password"}
+                {loading
+                  ? (tokenType === "invite" ? "Activating…" : "Setting password…")
+                  : (tokenType === "invite" ? "Activate Account" : "Set New Password")}
               </button>
             </form>
           </>
