@@ -755,13 +755,11 @@ function AuthGate({ onLogin, dark, setDark }) {
     try {
       if (tokenType === "invite") {
         // ── INVITE FLOW ──────────────────────────────────────────────────────
-        // GoTrue on Netlify does not reliably persist passwords set during
-        // /verify. Workaround: verify the invite to confirm the account, then
-        // immediately send a password recovery email. The user sets their real
-        // password via that link, which is known to persist correctly.
+        // GoTrue's user-facing PUT /user does not persist passwords on Netlify.
+        // Fix: verify the invite to get a session + user ID, then call our
+        // set-password serverless function which uses the admin API instead.
 
-        // Step 1: verify invite token to activate the account (password param
-        // is sent but won't stick — that's expected, recovery email handles it)
+        // Step 1: verify invite token — activates account, gives us access token + user ID
         const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -773,18 +771,30 @@ function AuthGate({ onLogin, dark, setDark }) {
           setLoading(false); return;
         }
 
-        // Step 2: send recovery email so they can set a persistent password
-        // Use the email from the verified token payload
+        // Step 2: call admin function to persistently set the password
         const payload = parseJwt(verifyData.access_token);
-        const userEmail = payload?.email || email;
-        await fetch(`${GOTRUE_BASE}/recover`, {
+        const userId = payload?.sub;
+        const setPwRes = await fetch("/.netlify/functions/set-password", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: userEmail }),
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${verifyData.access_token}`,
+          },
+          body: JSON.stringify({ userId, password }),
         });
+        const setPwData = await setPwRes.json();
+        if (!setPwRes.ok) {
+          console.warn("set-password function failed:", setPwData);
+          // Non-fatal — session still works, but warn user they may need to reset password
+          setError("Account activated but password setup had an issue. Use 'Forgot password' to set your password, then sign in.");
+          setLoading(false); return;
+        }
 
-        // Step 3: show "check your email" screen — do NOT log them in yet
-        setMode("invite_sent");
+        // Step 3: log them straight in — password is now persisted
+        saveSession(verifyData);
+        const user = extractUserFromToken(verifyData);
+        if (user) onLogin(user);
+        else setError("Account activated — please sign in with your new password.");
 
       } else {
         // ── RECOVERY FLOW ────────────────────────────────────────────────────
@@ -908,7 +918,7 @@ function AuthGate({ onLogin, dark, setDark }) {
             <div className="auth-mode-lbl">{tokenType === "invite" ? "Accept invite" : "Reset password"}</div>
             <p className="auth-sub">
               {tokenType === "invite"
-                ? "Enter a password to activate your account. You'll receive a confirmation email to finalize it."
+                ? "Welcome! Set a password to activate your account."
                 : "Choose a new password for your account."}
             </p>
             <form className="auth-form" onSubmit={handleSetPassword}>
