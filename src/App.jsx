@@ -533,6 +533,31 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .s-price-base{color:var(--text);font-weight:500}
 .s-price-qty{color:var(--t2)}
 .cat-hdr td{padding:5px 12px;background:var(--s3);border-bottom:1px solid var(--b2);border-top:1px solid var(--b2);font-family:var(--fd);font-size:9px;color:var(--brand);font-weight:700;letter-spacing:.1em;text-transform:uppercase;}
+/* ── CATEGORY PICKER ── */
+.cat-picker-wrap{position:relative;display:inline-block}
+.cat-picker-btn{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;border:1px solid var(--b2);background:var(--s1);color:var(--t2);font-family:var(--fm);font-size:11px;cursor:pointer;white-space:nowrap;transition:all .15s}
+.cat-picker-btn:hover{background:var(--s3);color:var(--text)}
+.cat-picker-btn.active{border-color:var(--brand);color:var(--brand)}
+.cat-picker-dropdown{position:absolute;top:calc(100% + 4px);left:0;z-index:200;background:var(--s1);border:1px solid var(--b2);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:220px;max-height:320px;overflow-y:auto;padding:6px 0}
+.cat-picker-controls{display:flex;gap:0;border-bottom:1px solid var(--b1);padding:4px 8px 8px}
+.cat-picker-controls button{flex:1;padding:3px 0;font-size:10px;font-family:var(--fm);cursor:pointer;background:transparent;border:1px solid var(--b2);color:var(--t2);transition:all .15s}
+.cat-picker-controls button:first-child{border-radius:4px 0 0 4px}
+.cat-picker-controls button:last-child{border-radius:0 4px 4px 0;border-left:none}
+.cat-picker-controls button:hover{background:var(--s3);color:var(--text)}
+.cat-picker-item{display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;font-size:11px;font-family:var(--fm);color:var(--t2);transition:background .1s}
+.cat-picker-item:hover{background:var(--s2);color:var(--text)}
+.cat-picker-item input{accent-color:var(--brand);cursor:pointer;flex-shrink:0}
+.cat-tags{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.cat-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:20px;background:var(--brand-dim);border:1px solid rgba(72,147,103,.3);font-size:10px;font-family:var(--fm);color:var(--brand);white-space:nowrap}
+.cat-tag button{background:none;border:none;cursor:pointer;color:var(--brand);font-size:11px;line-height:1;padding:0;opacity:.6;transition:opacity .15s}
+.cat-tag button:hover{opacity:1}
+/* ── CATEGORY SECTION TABLES ── */
+.sheet-sections{flex:1;overflow:auto;background:var(--bg);padding:0}
+.cat-section{margin-bottom:0}
+.cat-section-hdr{padding:7px 14px;background:var(--s2);border-bottom:2px solid var(--brand);border-top:1px solid var(--b1);display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:20}
+.cat-section-hdr:first-child{border-top:none}
+.cat-section-title{font-family:var(--fd);font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}
+.cat-section-count{font-family:var(--fm);font-size:9px;color:var(--t3)}
 
 /* ── CUSTOMER VIEW ── */
 .custv{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -657,6 +682,7 @@ function AuthGate({ onLogin, dark, setDark }) {
   const [password2, setPassword2] = useState("");
   const [loading,   setLoading]   = useState(false);
   const [error,     setError]     = useState("");
+  const [showPw,    setShowPw]    = useState(false);
 
   // Detect invite_token or recovery_token in URL hash on mount
   useEffect(() => {
@@ -727,6 +753,7 @@ function AuthGate({ onLogin, dark, setDark }) {
     if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
     setLoading(true); setError("");
     try {
+      // Step 1: verify the token — this creates an authenticated session
       const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -741,10 +768,29 @@ function AuthGate({ onLogin, dark, setDark }) {
         setError(verifyData.error_description || verifyData.msg || "Token is invalid or expired. Please request a new link.");
         setLoading(false); return;
       }
+
+      // Step 2: use the verify session's access token to PUT /user and actually commit the password
+      // Without this step, /verify only creates a one-time session — the password isn't persisted
+      const accessToken = verifyData.access_token;
+      const putRes = await fetch(`${GOTRUE_BASE}/user`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ password }),
+      });
+      const putData = await putRes.json();
+      if (!putRes.ok) {
+        // PUT failed — fall back to the verify session and warn user
+        console.warn("PUT /user failed:", putData);
+      }
+
+      // Step 3: log the user in using the verify session
       saveSession(verifyData);
       const user = extractUserFromToken(verifyData);
       if (user) onLogin(user);
-      else setError("Password set, but could not read your account. Please try logging in.");
+      else setError("Password set — please sign in with your new password.");
     } catch {
       setError("Network error — please try again.");
     }
@@ -769,8 +815,15 @@ function AuthGate({ onLogin, dark, setDark }) {
               </div>
               <div className="auth-field">
                 <label className="auth-label">Password</label>
-                <input className="auth-input" type="password" placeholder="••••••••"
-                  value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" />
+                <div style={{position:"relative"}}>
+                  <input className="auth-input" type={showPw?"text":"password"} placeholder="••••••••"
+                    value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password"
+                    style={{paddingRight:36}} />
+                  <button type="button" onClick={()=>setShowPw(s=>!s)}
+                    style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",fontSize:13,padding:2}}>
+                    {showPw?"🙈":"👁"}
+                  </button>
+                </div>
               </div>
               <button className="auth-btn" type="submit" disabled={loading}>
                 {loading && <span className="auth-btn-spinner" />}
@@ -835,8 +888,15 @@ function AuthGate({ onLogin, dark, setDark }) {
               {error && <div className="auth-err">{error}</div>}
               <div className="auth-field">
                 <label className="auth-label">New Password</label>
-                <input className="auth-input" type="password" placeholder="8+ characters"
-                  value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="new-password" />
+                <div style={{position:"relative"}}>
+                  <input className="auth-input" type={showPw?"text":"password"} placeholder="8+ characters"
+                    value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="new-password"
+                    style={{paddingRight:36}} />
+                  <button type="button" onClick={()=>setShowPw(s=>!s)}
+                    style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",fontSize:13,padding:2}}>
+                    {showPw?"🙈":"👁"}
+                  </button>
+                </div>
               </div>
               <div className="auth-field">
                 <label className="auth-label">Confirm Password</label>
@@ -1131,39 +1191,126 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
 }
 
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
-function SheetView({ category, visibleTiers, allData, caps }) {
-  const [tier,   setTier]   = useState(visibleTiers[0] || "Wholesale");
-  const [search, setSearch] = useState("");
+// ── Category picker dropdown ──────────────────────────────────────────────────
+function CategoryPicker({ allCategories, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useCallback(node => {
+    if (!node) return;
+    const handler = e => { if (!node.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const allSelected = selected.size === allCategories.length;
+  const noneSelected = selected.size === 0;
+
+  function toggle(cat) {
+    const next = new Set(selected);
+    next.has(cat) ? next.delete(cat) : next.add(cat);
+    onChange(next);
+  }
+  function selectAll() { onChange(new Set(allCategories)); }
+  function clearAll()  { onChange(new Set()); }
+
+  return (
+    <div className="cat-picker-wrap" ref={ref}>
+      <button
+        className={`cat-picker-btn${!allSelected ? " active" : ""}`}
+        onClick={()=>setOpen(o=>!o)}
+      >
+        Categories
+        {!allSelected && <span style={{fontWeight:700}}>{selected.size}/{allCategories.length}</span>}
+        <span style={{fontSize:9,opacity:.6}}>{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="cat-picker-dropdown">
+          <div className="cat-picker-controls">
+            <button onClick={selectAll} disabled={allSelected}>All</button>
+            <button onClick={clearAll}  disabled={noneSelected}>Clear</button>
+          </div>
+          {allCategories.map(cat=>(
+            <label key={cat} className="cat-picker-item">
+              <input type="checkbox" checked={selected.has(cat)} onChange={()=>toggle(cat)}/>
+              {cat}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SheetView({ allCategories, visibleTiers, allData, caps }) {
+  const [tier,         setTier]         = useState(visibleTiers[0] || "Wholesale");
+  const [search,       setSearch]       = useState("");
+  const [selectedCats, setSelectedCats] = useState(()=> new Set(allCategories));
+
+  // Keep selectedCats in sync if allCategories changes (data load)
+  useEffect(()=>{
+    setSelectedCats(new Set(allCategories));
+  }, [allCategories.join(",")]);
+
   const activeTier = visibleTiers.includes(tier) ? tier : visibleTiers[0];
+  const color = TIER_COLORS[activeTier];
 
   const data = useMemo(()=>getTierFlat(allData, activeTier), [allData, activeTier]);
 
-  // Search is global — ignore category filter when searching
-  const effectiveCat = search ? "All" : category;
-
-  const rows = useMemo(()=>{
+  // All rows matching search + selected categories, sorted by category then name
+  const allRows = useMemo(()=>{
     let entries = Object.entries(data);
-    if (effectiveCat !== "All") entries = entries.filter(([,v])=>v.category===effectiveCat);
-    if (search) { const q=search.toLowerCase(); entries=entries.filter(([sku,v])=>v.parent_name.toLowerCase().includes(q)||sku.toLowerCase().includes(q)||v.parent_sku.toLowerCase().includes(q)); }
+    // When searching, show all categories; otherwise filter to selected
+    if (!search) entries = entries.filter(([,v])=>selectedCats.has(v.category));
+    if (search) {
+      const q = search.toLowerCase();
+      entries = entries.filter(([sku,v])=>
+        v.parent_name.toLowerCase().includes(q) ||
+        sku.toLowerCase().includes(q) ||
+        v.parent_sku.toLowerCase().includes(q)
+      );
+    }
     return entries.sort((a,b)=>{
       if(a[1].category!==b[1].category) return a[1].category.localeCompare(b[1].category);
       return a[1].parent_name.localeCompare(b[1].parent_name);
     });
-  },[data, effectiveCat, search]);
+  },[data, selectedCats, search]);
 
-  const color = TIER_COLORS[activeTier];
-  let lastCat = null;
-
-  // Derive qty break columns from the FILTERED rows only, suppress break=1
-  const sheetBreaks = useMemo(() => {
-    const breaks = new Set();
-    rows.forEach(([,v]) => {
-      Object.keys(v).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
-        if (v[b] != null) breaks.add(b);
-      });
+  // Group rows by category — each category gets its own qty break columns
+  const categoryGroups = useMemo(()=>{
+    const groups = [];
+    let currentCat = null;
+    let currentRows = [];
+    allRows.forEach(([sku,v])=>{
+      if (v.category !== currentCat) {
+        if (currentCat !== null) groups.push({ cat: currentCat, rows: currentRows });
+        currentCat = v.category;
+        currentRows = [];
+      }
+      currentRows.push([sku, v]);
     });
-    return [...breaks].sort((a,b) => a - b);
-  }, [rows]);
+    if (currentCat !== null) groups.push({ cat: currentCat, rows: currentRows });
+
+    // Derive qty breaks per category
+    return groups.map(({cat, rows})=>{
+      const breaks = new Set();
+      rows.forEach(([,v])=>{
+        Object.keys(v).filter(k=>!isNaN(k)).map(Number).filter(b=>b!==1).forEach(b=>{
+          if(v[b]!=null) breaks.add(b);
+        });
+      });
+      const catBreaks = [...breaks].sort((a,b)=>a-b);
+      return { cat, rows, catBreaks };
+    });
+  },[allRows]);
+
+  // For CSV: union of all qty breaks across selected categories (flat crosstab)
+  const csvBreaks = useMemo(()=>{
+    const s = new Set();
+    categoryGroups.forEach(({catBreaks})=>catBreaks.forEach(b=>s.add(b)));
+    return [...s].sort((a,b)=>a-b);
+  },[categoryGroups]);
+
+  const totalVariants = allRows.length;
+  const allSelected = selectedCats.size === allCategories.length;
 
   return (
     <div className="sheet">
@@ -1175,26 +1322,33 @@ function SheetView({ category, visibleTiers, allData, caps }) {
               onClick={()=>setTier(t)}>{t}</button>
           ))}
         </div>
-        <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
 
-        {/* Crosstab CSV */}
+        <CategoryPicker
+          allCategories={allCategories}
+          selected={selectedCats}
+          onChange={setSelectedCats}
+        />
+
+        <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
+        <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{totalVariants}</span> variants</span>
+
+        {/* Crosstab CSV — flat union of all qty breaks, single header row */}
         {caps.canExportCSV && <button className="btn" onClick={()=>downloadCSV(
-          `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
-          ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
-          rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...sheetBreaks.map(q=>v[q]??"")])
+          `${activeTier}-prices${!allSelected?"-filtered":""}.csv`,
+          ["child_sku","parent_sku","parent_name","variant_name","category",...csvBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
+          allRows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...csvBreaks.map(q=>v[q]??"")])
         )}>↓ CSV</button>}
 
         {/* JSON — normalized, machine readable */}
         {caps.canExportJSON && <button className="btn" onClick={()=>{
-          const payload = rows.map(([sku,v])=>({
+          const payload = allRows.map(([sku,v])=>({
             child_sku:sku, parent_sku:v.parent_sku, parent_name:v.parent_name,
             variant_name:v.variant_name, category:v.category, tier:activeTier,
-            prices:Object.fromEntries(sheetBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
+            prices:Object.fromEntries(csvBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
           }));
           const a = document.createElement("a");
           a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
-          a.download = `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.json`;
+          a.download = `${activeTier}-prices${!allSelected?"-filtered":""}.json`;
           a.click();
         }}>↓ JSON</button>}
 
@@ -1203,9 +1357,11 @@ function SheetView({ category, visibleTiers, allData, caps }) {
           <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)",opacity:0.6,cursor:"not-allowed",display:"flex",alignItems:"center",gap:5}}
             onClick={()=>{
               const sageRows = buildSageExport(allData);
-              const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
+              const filtered = !allSelected
+                ? sageRows.filter(r=>selectedCats.has(r.category))
+                : sageRows;
               downloadCSV(
-                `sage-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
+                `sage-prices${!allSelected?"-filtered":""}.csv`,
                 ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
                 filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
               );
@@ -1217,50 +1373,71 @@ function SheetView({ category, visibleTiers, allData, caps }) {
         )}
       </div>
 
-      <div className="sheet-wrap">
-        <table className="st">
-          <thead>
-            <tr>
-              <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
-              <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
-              {sheetBreaks.map(q=>(
-                <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
-                  {q===0?"Price":`${q}+`}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(([sku,v])=>{
-              const showCat = v.category !== lastCat;
-              lastCat = v.category;
-              return [
-                showCat && (
-                  <tr key={`ch-${v.category}`} className="cat-hdr">
-                    <td colSpan={2+sheetBreaks.length} style={{position:"sticky",left:0}}>{v.category}</td>
-                  </tr>
-                ),
-                <tr key={sku}>
-                  <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
-                    <div className="s-name">{v.parent_name}</div>
-                    {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
-                  </td>
-                  <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
-                  {sheetBreaks.map(q=>{
-                    const p = v[q];
-                    return (
-                      <td key={q} className="r">
-                        {p != null
-                          ? <span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
-                          : <span style={{color:"var(--t4)"}}>—</span>}
-                      </td>
-                    );
-                  })}
+      {/* Selected category tags — only shown when not all selected */}
+      {!allSelected && !search && selectedCats.size > 0 && (
+        <div style={{padding:"6px 14px",borderBottom:"1px solid var(--b1)",background:"var(--s1)",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+          <span style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)"}}>Showing:</span>
+          <div className="cat-tags">
+            {[...selectedCats].sort().map(cat=>(
+              <span key={cat} className="cat-tag">
+                {cat}
+                <button onClick={()=>{ const n=new Set(selectedCats); n.delete(cat); setSelectedCats(n); }} title="Remove">×</button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Per-category section tables */}
+      <div className="sheet-sections">
+        {categoryGroups.length === 0 && (
+          <div className="empty" style={{padding:40,textAlign:"center"}}>
+            <h3>No variants found</h3>
+            <p>Adjust search or select categories above</p>
+          </div>
+        )}
+        {categoryGroups.map(({cat, rows, catBreaks})=>(
+          <div key={cat} className="cat-section">
+            <div className="cat-section-hdr">
+              <span className="cat-section-title">{cat}</span>
+              <span className="cat-section-count">{rows.length} variant{rows.length!==1?"s":""}</span>
+            </div>
+            <table className="st">
+              <thead>
+                <tr>
+                  <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
+                  <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
+                  {catBreaks.map(q=>(
+                    <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
+                      {q===0?"Price":`${q}+`}
+                    </th>
+                  ))}
                 </tr>
-              ].filter(Boolean);
-            })}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {rows.map(([sku,v])=>(
+                  <tr key={sku}>
+                    <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
+                      <div className="s-name">{v.parent_name}</div>
+                      {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
+                    </td>
+                    <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
+                    {catBreaks.map(q=>{
+                      const p = v[q];
+                      return (
+                        <td key={q} className="r">
+                          {p != null
+                            ? <span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
+                            : <span style={{color:"var(--t4)"}}>—</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1760,7 +1937,7 @@ export default function App() {
 
           {/* SHEET VIEW */}
           {view==="sheet" && caps.canViewSheet && (
-            <SheetView category={category} visibleTiers={caps.tiers} allData={allData} caps={caps}/>
+            <SheetView allCategories={categories} visibleTiers={caps.tiers} allData={allData} caps={caps}/>
           )}
 
           {/* CUSTOMER VIEW */}
