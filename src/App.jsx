@@ -778,9 +778,11 @@ function AuthGate({ onLogin, dark, setDark }) {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password, data: {} }),
       });
       const putData = await putRes.json();
+      // Log full response so we can diagnose in Network/Console tab
+      console.log("PUT /user status:", putRes.status, "response:", JSON.stringify(putData));
       if (!putRes.ok) {
         // PUT failed — fall back to the verify session and warn user
         console.warn("PUT /user failed:", putData);
