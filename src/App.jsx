@@ -533,31 +533,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .s-price-base{color:var(--text);font-weight:500}
 .s-price-qty{color:var(--t2)}
 .cat-hdr td{padding:5px 12px;background:var(--s3);border-bottom:1px solid var(--b2);border-top:1px solid var(--b2);font-family:var(--fd);font-size:9px;color:var(--brand);font-weight:700;letter-spacing:.1em;text-transform:uppercase;}
-/* ── CATEGORY PICKER ── */
-.cat-picker-wrap{position:relative;display:inline-block}
-.cat-picker-btn{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;border:1px solid var(--b2);background:var(--s1);color:var(--t2);font-family:var(--fm);font-size:11px;cursor:pointer;white-space:nowrap;transition:all .15s}
-.cat-picker-btn:hover{background:var(--s3);color:var(--text)}
-.cat-picker-btn.active{border-color:var(--brand);color:var(--brand)}
-.cat-picker-dropdown{position:absolute;top:calc(100% + 4px);left:0;z-index:200;background:var(--s1);border:1px solid var(--b2);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:220px;max-height:320px;overflow-y:auto;padding:6px 0}
-.cat-picker-controls{display:flex;gap:0;border-bottom:1px solid var(--b1);padding:4px 8px 8px}
-.cat-picker-controls button{flex:1;padding:3px 0;font-size:10px;font-family:var(--fm);cursor:pointer;background:transparent;border:1px solid var(--b2);color:var(--t2);transition:all .15s}
-.cat-picker-controls button:first-child{border-radius:4px 0 0 4px}
-.cat-picker-controls button:last-child{border-radius:0 4px 4px 0;border-left:none}
-.cat-picker-controls button:hover{background:var(--s3);color:var(--text)}
-.cat-picker-item{display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;font-size:11px;font-family:var(--fm);color:var(--t2);transition:background .1s}
-.cat-picker-item:hover{background:var(--s2);color:var(--text)}
-.cat-picker-item input{accent-color:var(--brand);cursor:pointer;flex-shrink:0}
-.cat-tags{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
-.cat-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:20px;background:var(--brand-dim);border:1px solid rgba(72,147,103,.3);font-size:10px;font-family:var(--fm);color:var(--brand);white-space:nowrap}
-.cat-tag button{background:none;border:none;cursor:pointer;color:var(--brand);font-size:11px;line-height:1;padding:0;opacity:.6;transition:opacity .15s}
-.cat-tag button:hover{opacity:1}
-/* ── CATEGORY SECTION TABLES ── */
-.sheet-sections{flex:1;overflow:auto;background:var(--bg);padding:0}
-.cat-section{margin-bottom:0}
-.cat-section-hdr{padding:7px 14px;background:var(--s2);border-bottom:2px solid var(--brand);border-top:1px solid var(--b1);display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:20}
-.cat-section-hdr:first-child{border-top:none}
-.cat-section-title{font-family:var(--fd);font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}
-.cat-section-count{font-family:var(--fm);font-size:9px;color:var(--t3)}
 
 /* ── CUSTOMER VIEW ── */
 .custv{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -753,68 +728,30 @@ function AuthGate({ onLogin, dark, setDark }) {
     if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
     setLoading(true); setError("");
     try {
-      if (tokenType === "invite") {
-        // ── INVITE FLOW ──────────────────────────────────────────────────────
-        // GoTrue's user-facing PUT /user does not persist passwords on Netlify.
-        // Fix: verify the invite to get a session + user ID, then call our
-        // set-password serverless function which uses the admin API instead.
-
-        // Step 1: verify invite token — activates account, gives us access token + user ID
-        const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "signup", token: hashToken, password }),
-        });
-        const verifyData = await verifyRes.json();
-        if (!verifyRes.ok) {
-          setError(verifyData.error_description || verifyData.msg || "Invite link is invalid or expired. Please contact your administrator.");
-          setLoading(false); return;
-        }
-
-        // Step 2: call admin function to persistently set the password
-        const payload = parseJwt(verifyData.access_token);
-        const userId = payload?.sub;
-        const setPwRes = await fetch("/.netlify/functions/set-password", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${verifyData.access_token}`,
-          },
-          body: JSON.stringify({ userId, password }),
-        });
-        const setPwData = await setPwRes.json();
-        if (!setPwRes.ok) {
-          console.warn("set-password function failed:", setPwData);
-          // Non-fatal — session still works, but warn user they may need to reset password
-          setError("Account activated but password setup had an issue. Use 'Forgot password' to set your password, then sign in.");
-          setLoading(false); return;
-        }
-
-        // Step 3: log them straight in — password is now persisted
-        saveSession(verifyData);
-        const user = extractUserFromToken(verifyData);
-        if (user) onLogin(user);
-        else setError("Account activated — please sign in with your new password.");
-
-      } else {
-        // ── RECOVERY FLOW ────────────────────────────────────────────────────
-        // Password reset via recovery token — this path works correctly as-is
-        const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "recovery", token: hashToken, password }),
-        });
-        const verifyData = await verifyRes.json();
-        if (!verifyRes.ok) {
-          setError(verifyData.error_description || verifyData.msg || "Token is invalid or expired. Please request a new link.");
-          setLoading(false); return;
-        }
-        // Log them straight in — recovery flow persists password correctly
-        saveSession(verifyData);
-        const user = extractUserFromToken(verifyData);
-        if (user) onLogin(user);
-        else setError("Password set — please sign in with your new password.");
+      // Recovery flow: verify the token → get a session → log straight in.
+      // NOTE: Invite flow has been removed. New users are created via the admin
+      // "Create User" panel (/.netlify/functions/create-user) and notified of
+      // their temp password manually. They then use Forgot Password to set their own.
+      // The Netlify hosted GoTrue instance does not persist passwords set via
+      // the invite/verify path regardless of approach tried.
+      const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "recovery",
+          token: hashToken,
+          password,
+        }),
+      });
+      const verifyData = await verifyRes.json();
+      if (!verifyRes.ok) {
+        setError(verifyData.error_description || verifyData.msg || "Reset link is invalid or expired. Please request a new one.");
+        setLoading(false); return;
       }
+      saveSession(verifyData);
+      const user = extractUserFromToken(verifyData);
+      if (user) onLogin(user);
+      else setError("Password updated — please sign in with your new password.");
     } catch {
       setError("Network error — please try again.");
     }
@@ -900,19 +837,6 @@ function AuthGate({ onLogin, dark, setDark }) {
           </>
         )}
 
-        {mode === "invite_sent" && (
-          <>
-            <div className="auth-mode-lbl">One more step</div>
-            <p className="auth-sub">Your account has been activated. We've sent a password setup link to your email.</p>
-            <div className="auth-success">
-              Check your inbox and click the link to set your password. Once done, you can sign in normally.
-            </div>
-            <div style={{fontSize:11,color:"var(--t3)",fontFamily:"var(--fm)",marginTop:12,textAlign:"center",lineHeight:1.5}}>
-              Didn't get the email? Check your spam folder,<br/>or contact your administrator for a new invite.
-            </div>
-          </>
-        )}
-
         {mode === "set_pass" && (
           <>
             <div className="auth-mode-lbl">{tokenType === "invite" ? "Accept invite" : "Reset password"}</div>
@@ -942,9 +866,7 @@ function AuthGate({ onLogin, dark, setDark }) {
               </div>
               <button className="auth-btn" type="submit" disabled={loading}>
                 {loading && <span className="auth-btn-spinner" />}
-                {loading
-                  ? (tokenType === "invite" ? "Activating…" : "Setting password…")
-                  : (tokenType === "invite" ? "Activate Account" : "Set New Password")}
+                {loading ? "Setting password…" : tokenType === "invite" ? "Activate Account" : "Set New Password"}
               </button>
             </form>
           </>
@@ -1230,126 +1152,39 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
 }
 
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
-// ── Category picker dropdown ──────────────────────────────────────────────────
-function CategoryPicker({ allCategories, selected, onChange }) {
-  const [open, setOpen] = useState(false);
-  const ref = useCallback(node => {
-    if (!node) return;
-    const handler = e => { if (!node.contains(e.target)) setOpen(false); };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const allSelected = selected.size === allCategories.length;
-  const noneSelected = selected.size === 0;
-
-  function toggle(cat) {
-    const next = new Set(selected);
-    next.has(cat) ? next.delete(cat) : next.add(cat);
-    onChange(next);
-  }
-  function selectAll() { onChange(new Set(allCategories)); }
-  function clearAll()  { onChange(new Set()); }
-
-  return (
-    <div className="cat-picker-wrap" ref={ref}>
-      <button
-        className={`cat-picker-btn${!allSelected ? " active" : ""}`}
-        onClick={()=>setOpen(o=>!o)}
-      >
-        Categories
-        {!allSelected && <span style={{fontWeight:700}}>{selected.size}/{allCategories.length}</span>}
-        <span style={{fontSize:9,opacity:.6}}>{open ? "▲" : "▼"}</span>
-      </button>
-      {open && (
-        <div className="cat-picker-dropdown">
-          <div className="cat-picker-controls">
-            <button onClick={selectAll} disabled={allSelected}>All</button>
-            <button onClick={clearAll}  disabled={noneSelected}>Clear</button>
-          </div>
-          {allCategories.map(cat=>(
-            <label key={cat} className="cat-picker-item">
-              <input type="checkbox" checked={selected.has(cat)} onChange={()=>toggle(cat)}/>
-              {cat}
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SheetView({ allCategories, visibleTiers, allData, caps }) {
-  const [tier,         setTier]         = useState(visibleTiers[0] || "Wholesale");
-  const [search,       setSearch]       = useState("");
-  const [selectedCats, setSelectedCats] = useState(()=> new Set(allCategories));
-
-  // Keep selectedCats in sync if allCategories changes (data load)
-  useEffect(()=>{
-    setSelectedCats(new Set(allCategories));
-  }, [allCategories.join(",")]);
-
+function SheetView({ category, visibleTiers, allData, caps }) {
+  const [tier,   setTier]   = useState(visibleTiers[0] || "Wholesale");
+  const [search, setSearch] = useState("");
   const activeTier = visibleTiers.includes(tier) ? tier : visibleTiers[0];
-  const color = TIER_COLORS[activeTier];
 
   const data = useMemo(()=>getTierFlat(allData, activeTier), [allData, activeTier]);
 
-  // All rows matching search + selected categories, sorted by category then name
-  const allRows = useMemo(()=>{
+  // Search is global — ignore category filter when searching
+  const effectiveCat = search ? "All" : category;
+
+  const rows = useMemo(()=>{
     let entries = Object.entries(data);
-    // When searching, show all categories; otherwise filter to selected
-    if (!search) entries = entries.filter(([,v])=>selectedCats.has(v.category));
-    if (search) {
-      const q = search.toLowerCase();
-      entries = entries.filter(([sku,v])=>
-        v.parent_name.toLowerCase().includes(q) ||
-        sku.toLowerCase().includes(q) ||
-        v.parent_sku.toLowerCase().includes(q)
-      );
-    }
+    if (effectiveCat !== "All") entries = entries.filter(([,v])=>v.category===effectiveCat);
+    if (search) { const q=search.toLowerCase(); entries=entries.filter(([sku,v])=>v.parent_name.toLowerCase().includes(q)||sku.toLowerCase().includes(q)||v.parent_sku.toLowerCase().includes(q)); }
     return entries.sort((a,b)=>{
       if(a[1].category!==b[1].category) return a[1].category.localeCompare(b[1].category);
       return a[1].parent_name.localeCompare(b[1].parent_name);
     });
-  },[data, selectedCats, search]);
+  },[data, effectiveCat, search]);
 
-  // Group rows by category — each category gets its own qty break columns
-  const categoryGroups = useMemo(()=>{
-    const groups = [];
-    let currentCat = null;
-    let currentRows = [];
-    allRows.forEach(([sku,v])=>{
-      if (v.category !== currentCat) {
-        if (currentCat !== null) groups.push({ cat: currentCat, rows: currentRows });
-        currentCat = v.category;
-        currentRows = [];
-      }
-      currentRows.push([sku, v]);
-    });
-    if (currentCat !== null) groups.push({ cat: currentCat, rows: currentRows });
+  const color = TIER_COLORS[activeTier];
+  let lastCat = null;
 
-    // Derive qty breaks per category
-    return groups.map(({cat, rows})=>{
-      const breaks = new Set();
-      rows.forEach(([,v])=>{
-        Object.keys(v).filter(k=>!isNaN(k)).map(Number).filter(b=>b!==1).forEach(b=>{
-          if(v[b]!=null) breaks.add(b);
-        });
+  // Derive qty break columns from the FILTERED rows only, suppress break=1
+  const sheetBreaks = useMemo(() => {
+    const breaks = new Set();
+    rows.forEach(([,v]) => {
+      Object.keys(v).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
+        if (v[b] != null) breaks.add(b);
       });
-      const catBreaks = [...breaks].sort((a,b)=>a-b);
-      return { cat, rows, catBreaks };
     });
-  },[allRows]);
-
-  // For CSV: union of all qty breaks across selected categories (flat crosstab)
-  const csvBreaks = useMemo(()=>{
-    const s = new Set();
-    categoryGroups.forEach(({catBreaks})=>catBreaks.forEach(b=>s.add(b)));
-    return [...s].sort((a,b)=>a-b);
-  },[categoryGroups]);
-
-  const totalVariants = allRows.length;
-  const allSelected = selectedCats.size === allCategories.length;
+    return [...breaks].sort((a,b) => a - b);
+  }, [rows]);
 
   return (
     <div className="sheet">
@@ -1361,33 +1196,26 @@ function SheetView({ allCategories, visibleTiers, allData, caps }) {
               onClick={()=>setTier(t)}>{t}</button>
           ))}
         </div>
-
-        <CategoryPicker
-          allCategories={allCategories}
-          selected={selectedCats}
-          onChange={setSelectedCats}
-        />
-
         <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{totalVariants}</span> variants</span>
+        <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
 
-        {/* Crosstab CSV — flat union of all qty breaks, single header row */}
+        {/* Crosstab CSV */}
         {caps.canExportCSV && <button className="btn" onClick={()=>downloadCSV(
-          `${activeTier}-prices${!allSelected?"-filtered":""}.csv`,
-          ["child_sku","parent_sku","parent_name","variant_name","category",...csvBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
-          allRows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...csvBreaks.map(q=>v[q]??"")])
+          `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
+          ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
+          rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...sheetBreaks.map(q=>v[q]??"")])
         )}>↓ CSV</button>}
 
         {/* JSON — normalized, machine readable */}
         {caps.canExportJSON && <button className="btn" onClick={()=>{
-          const payload = allRows.map(([sku,v])=>({
+          const payload = rows.map(([sku,v])=>({
             child_sku:sku, parent_sku:v.parent_sku, parent_name:v.parent_name,
             variant_name:v.variant_name, category:v.category, tier:activeTier,
-            prices:Object.fromEntries(csvBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
+            prices:Object.fromEntries(sheetBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
           }));
           const a = document.createElement("a");
           a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
-          a.download = `${activeTier}-prices${!allSelected?"-filtered":""}.json`;
+          a.download = `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.json`;
           a.click();
         }}>↓ JSON</button>}
 
@@ -1396,11 +1224,9 @@ function SheetView({ allCategories, visibleTiers, allData, caps }) {
           <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)",opacity:0.6,cursor:"not-allowed",display:"flex",alignItems:"center",gap:5}}
             onClick={()=>{
               const sageRows = buildSageExport(allData);
-              const filtered = !allSelected
-                ? sageRows.filter(r=>selectedCats.has(r.category))
-                : sageRows;
+              const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
               downloadCSV(
-                `sage-prices${!allSelected?"-filtered":""}.csv`,
+                `sage-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
                 ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
                 filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
               );
@@ -1412,71 +1238,50 @@ function SheetView({ allCategories, visibleTiers, allData, caps }) {
         )}
       </div>
 
-      {/* Selected category tags — only shown when not all selected */}
-      {!allSelected && !search && selectedCats.size > 0 && (
-        <div style={{padding:"6px 14px",borderBottom:"1px solid var(--b1)",background:"var(--s1)",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-          <span style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)"}}>Showing:</span>
-          <div className="cat-tags">
-            {[...selectedCats].sort().map(cat=>(
-              <span key={cat} className="cat-tag">
-                {cat}
-                <button onClick={()=>{ const n=new Set(selectedCats); n.delete(cat); setSelectedCats(n); }} title="Remove">×</button>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Per-category section tables */}
-      <div className="sheet-sections">
-        {categoryGroups.length === 0 && (
-          <div className="empty" style={{padding:40,textAlign:"center"}}>
-            <h3>No variants found</h3>
-            <p>Adjust search or select categories above</p>
-          </div>
-        )}
-        {categoryGroups.map(({cat, rows, catBreaks})=>(
-          <div key={cat} className="cat-section">
-            <div className="cat-section-hdr">
-              <span className="cat-section-title">{cat}</span>
-              <span className="cat-section-count">{rows.length} variant{rows.length!==1?"s":""}</span>
-            </div>
-            <table className="st">
-              <thead>
-                <tr>
-                  <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
-                  <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
-                  {catBreaks.map(q=>(
-                    <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
-                      {q===0?"Price":`${q}+`}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(([sku,v])=>(
-                  <tr key={sku}>
-                    <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
-                      <div className="s-name">{v.parent_name}</div>
-                      {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
-                    </td>
-                    <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
-                    {catBreaks.map(q=>{
-                      const p = v[q];
-                      return (
-                        <td key={q} className="r">
-                          {p != null
-                            ? <span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
-                            : <span style={{color:"var(--t4)"}}>—</span>}
-                        </td>
-                      );
-                    })}
+      <div className="sheet-wrap">
+        <table className="st">
+          <thead>
+            <tr>
+              <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
+              <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
+              {sheetBreaks.map(q=>(
+                <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
+                  {q===0?"Price":`${q}+`}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([sku,v])=>{
+              const showCat = v.category !== lastCat;
+              lastCat = v.category;
+              return [
+                showCat && (
+                  <tr key={`ch-${v.category}`} className="cat-hdr">
+                    <td colSpan={2+sheetBreaks.length} style={{position:"sticky",left:0}}>{v.category}</td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ))}
+                ),
+                <tr key={sku}>
+                  <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
+                    <div className="s-name">{v.parent_name}</div>
+                    {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
+                  </td>
+                  <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
+                  {sheetBreaks.map(q=>{
+                    const p = v[q];
+                    return (
+                      <td key={q} className="r">
+                        {p != null
+                          ? <span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
+                          : <span style={{color:"var(--t4)"}}>—</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ].filter(Boolean);
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -1674,6 +1479,136 @@ function CustomerView({ allData, caps }) {
   );
 }
 
+// ─── CREATE USER MODAL ────────────────────────────────────────────────────────
+// Admin-only modal to create new users via POST /admin/users (bypasses broken
+// invite/verify flow). Creates the user with a temp password; admin notifies
+// them manually and they use Forgot Password to set their own.
+function CreateUserModal({ user, onClose }) {
+  const [email,       setEmail]       = useState("");
+  const [role,        setRole]        = useState("viewer");
+  const [tempPw,      setTempPw]      = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState("");
+  const [result,      setResult]      = useState(null); // success result
+
+  async function handleCreate(e) {
+    e.preventDefault();
+    if (!email || !tempPw) { setError("Email and temporary password are required."); return; }
+    if (tempPw.length < 8) { setError("Temporary password must be at least 8 characters."); return; }
+    setLoading(true); setError("");
+    try {
+      const res = await fetch("/.netlify/functions/create-user", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${user.accessToken}`,
+        },
+        body: JSON.stringify({ email: email.trim().toLowerCase(), role, tempPassword: tempPw }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to create user.");
+      } else {
+        setResult(data);
+      }
+    } catch {
+      setError("Network error — please try again.");
+    }
+    setLoading(false);
+  }
+
+  const overlayStyle = {
+    position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:9999,
+    display:"flex",alignItems:"center",justifyContent:"center",
+  };
+  const cardStyle = {
+    background:"var(--s1)",borderRadius:12,padding:"32px 28px",width:400,maxWidth:"95vw",
+    boxShadow:"0 8px 40px rgba(0,0,0,0.25)",fontFamily:"var(--fb)",
+  };
+  const labelStyle = { display:"block",fontSize:12,color:"var(--t3)",marginBottom:5,marginTop:14,fontWeight:500 };
+  const inputStyle = { width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid var(--b2)",
+    background:"var(--bg)",color:"var(--t1)",fontSize:13,fontFamily:"var(--fb)" };
+  const btnStyle = { marginTop:20,width:"100%",padding:"10px",borderRadius:7,border:"none",
+    background:"var(--brand)",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer" };
+
+  return (
+    <div style={overlayStyle} onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+      <div style={cardStyle}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontFamily:"var(--fd)",fontSize:16,fontWeight:700,color:"var(--t1)"}}>Add User</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:18,cursor:"pointer",color:"var(--t3)"}}>✕</button>
+        </div>
+
+        {result ? (
+          // ── SUCCESS STATE ──
+          <div>
+            <div style={{background:"#e8f5ee",border:"1px solid #a8d5be",borderRadius:8,padding:"14px 16px",marginBottom:16}}>
+              <div style={{color:"#2a6645",fontWeight:600,fontSize:13,marginBottom:6}}>✓ User created successfully</div>
+              <div style={{fontSize:12,color:"#2a6645",lineHeight:1.6}}>
+                <strong>Email:</strong> {result.email}<br/>
+                <strong>Role:</strong> {result.role}<br/>
+                <strong>Password persisted:</strong> {result.passwordPersisted ? "✓ Yes" : "⚠ No — see note below"}
+              </div>
+            </div>
+            {!result.passwordPersisted && (
+              <div style={{background:"#fff8e1",border:"1px solid #ffe082",borderRadius:8,padding:"12px 14px",marginBottom:14,fontSize:12,color:"#7a5c00",lineHeight:1.6}}>
+                ⚠ <strong>Password not confirmed by GoTrue</strong> — this is a known Netlify Identity platform issue.
+                Try logging in with the credentials anyway; some instances accept the password despite not returning <code>encrypted_password</code>.
+                If login fails, the Supabase migration is the next step.
+              </div>
+            )}
+            <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",fontSize:12,color:"var(--t2)",lineHeight:1.7}}>
+              <strong>Next steps:</strong><br/>
+              1. Message {result.email} their temp password<br/>
+              2. Ask them to sign in, then immediately use <em>Forgot Password</em> to set their own<br/>
+              3. Assign role in Netlify Identity dashboard if needed (role was set to <strong>{result.role}</strong>)
+            </div>
+            <button style={{...btnStyle, marginTop:16}} onClick={()=>{ setResult(null); setEmail(""); setTempPw(""); }}>
+              Add Another User
+            </button>
+          </div>
+        ) : (
+          // ── FORM STATE ──
+          <form onSubmit={handleCreate}>
+            <div style={{fontSize:12,color:"var(--t3)",marginBottom:4,lineHeight:1.5}}>
+              Creates the account with a temporary password. The user logs in, then uses <em>Forgot Password</em> to set their own.
+            </div>
+            {error && (
+              <div style={{background:"#fce8e8",border:"1px solid #e8a8a8",borderRadius:6,padding:"8px 12px",fontSize:12,color:"#8b2020",marginTop:10}}>
+                {error}
+              </div>
+            )}
+            <label style={labelStyle}>Email address</label>
+            <input style={inputStyle} type="email" placeholder="user@patioproducts.com"
+              value={email} onChange={e=>setEmail(e.target.value)} autoFocus />
+
+            <label style={labelStyle}>Role</label>
+            <select style={inputStyle} value={role} onChange={e=>setRole(e.target.value)}>
+              <option value="viewer">viewer — Sheet View, no exports</option>
+              <option value="manager">manager — All views, CSV export</option>
+              <option value="admin">admin — Full access</option>
+              <option value="commercial">commercial — Commercial tier only</option>
+              <option value="wholesale">wholesale — Wholesale tiers only</option>
+              <option value="retail">retail — Retail tier only</option>
+            </select>
+
+            <label style={labelStyle}>Temporary password</label>
+            <input style={inputStyle} type="text" placeholder="Min 8 characters"
+              value={tempPw} onChange={e=>setTempPw(e.target.value)} autoComplete="off" />
+            <div style={{fontSize:11,color:"var(--t4)",marginTop:4}}>
+              Share this with the user privately. They should change it on first login.
+            </div>
+
+            <button style={{...btnStyle, opacity: loading ? 0.7 : 1}} type="submit" disabled={loading}>
+              {loading ? "Creating…" : "Create User"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [user,         setUser]        = useState(null);
@@ -1685,6 +1620,7 @@ export default function App() {
   const [sortBy,       setSortBy]      = useState("name");
   const [selectedProd, setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku] = useState(null);
+  const [showCreateUser, setShowCreateUser] = useState(false);
 
   // ── LIVE DATA ──
   const [allData,   setAllData]   = useState([]);
@@ -1854,6 +1790,14 @@ export default function App() {
               <span className="badge-soon">COMING SOON</span>
             </button>
           )}
+          {user?.role === "admin" && (
+            <button className="btn no-print"
+              style={{borderColor:"var(--brand)",color:"var(--brand)",fontSize:11,display:"flex",alignItems:"center",gap:5}}
+              onClick={()=>setShowCreateUser(true)}
+              title="Create a new user account">
+              + Add User
+            </button>
+          )}
           <button className="theme-btn" onClick={()=>setDark(d=>!d)} title={dark?"Switch to light mode":"Switch to dark mode"}>
             {dark ? "☀" : "◑"}
           </button>
@@ -1976,7 +1920,7 @@ export default function App() {
 
           {/* SHEET VIEW */}
           {view==="sheet" && caps.canViewSheet && (
-            <SheetView allCategories={categories} visibleTiers={caps.tiers} allData={allData} caps={caps}/>
+            <SheetView category={category} visibleTiers={caps.tiers} allData={allData} caps={caps}/>
           )}
 
           {/* CUSTOMER VIEW */}
@@ -1985,6 +1929,11 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {/* CREATE USER MODAL — admin only */}
+      {showCreateUser && (
+        <CreateUserModal user={user} onClose={()=>setShowCreateUser(false)} />
+      )}
     </div>
   );
 }
