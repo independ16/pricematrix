@@ -24,14 +24,19 @@ exports.handler = async function(event, context) {
   }
 
   // Extract admin token from Netlify Identity context
-  // This is automatically injected when the request includes a valid Bearer token
   const adminToken = context.clientContext?.identity?.token;
+  const identityUrl = context.clientContext?.identity?.url || "/.netlify/identity";
+  console.log("set-password: adminToken present:", !!adminToken, "identityUrl:", identityUrl);
   if (!adminToken) {
     console.error("set-password: no admin token in clientContext — was Authorization header sent?");
     return {
       statusCode: 401,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Admin token not available. Ensure Authorization header is present." }),
+      body: JSON.stringify({ 
+        error: "Admin token not available",
+        hasClientContext: !!context.clientContext,
+        hasIdentity: !!context.clientContext?.identity,
+      }),
     };
   }
 
@@ -94,7 +99,7 @@ exports.handler = async function(event, context) {
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: true }),
+      body: JSON.stringify({ ok: true, adminResponse: adminData }),
     };
 
   } catch (err) {
