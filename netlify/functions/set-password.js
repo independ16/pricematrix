@@ -92,11 +92,12 @@ exports.handler = async function(event, context) {
       };
     }
 
-    console.log("set-password: password set successfully for user", userId);
+    const hasEncryptedPassword = !!adminData.encrypted_password;
+    console.log("set-password: admin API response for user", userId, "| encrypted_password present:", hasEncryptedPassword);
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: true, adminResponse: adminData }),
+      body: JSON.stringify({ ok: true, adminResponse: adminData, passwordPersisted: hasEncryptedPassword }),
     };
 
   } catch (err) {
