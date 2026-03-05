@@ -71,9 +71,6 @@ exports.handler = async function(event, context) {
   }
 
   // Call GoTrue admin API to set the password
-  // The identity URL is available in clientContext.identity.url
-  const identityUrl = context.clientContext?.identity?.url || "/.netlify/identity";
-
   try {
     const adminRes = await fetch(`${identityUrl}/admin/users/${userId}`, {
       method: "PUT",
