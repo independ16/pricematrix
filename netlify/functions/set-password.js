@@ -78,7 +78,7 @@ exports.handler = async function(event, context) {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${adminToken}`,
       },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, confirm: true }),
     });
 
     const adminData = await adminRes.json();
