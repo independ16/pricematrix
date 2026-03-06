@@ -628,10 +628,18 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   @page{
     size:landscape;
     margin:12mm 10mm 20mm 10mm;
+    @bottom-left{
+      content:url;
+      font-size:6pt;color:#bbb;font-family:'DM Mono',monospace;
+    }
     @bottom-center{
       content:"CONFIDENTIAL — Property of Patio Products, Inc.  ·  Internal use only  ·  Do not distribute";
       font-size:6.5pt;color:#bbb;font-family:'DM Mono',monospace;letter-spacing:.03em;
       border-top:0.5pt solid #ddd;padding-top:2mm;
+    }
+    @bottom-right{
+      content:counter(page) " / " counter(pages);
+      font-size:6pt;color:#bbb;font-family:'DM Mono',monospace;
     }
   }
   .pt th,.pt td{border-color:#ddd!important}
