@@ -1,10 +1,8 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const TIERS = ["Retail", "Commercial", "Wholesale", "Wholesale_L2", "Wholesale_L3"];
 const ALL_TIERS = [...TIERS, "OEM"];
-const QTY_BREAKS_ALL  = [0, 1, 5, 10, 25, 50, 100]; // full data set (1 may exist as dupe of 0)
-const QTY_BREAKS      = [0, 5, 10, 25, 50, 100];     // display columns — qty_break 1 suppressed
 
 const TIER_COLORS = {
   Retail:       "#c94040",
@@ -15,168 +13,59 @@ const TIER_COLORS = {
   OEM:          "#888888",
 };
 
-const TIER_MULT = { Retail:1.0, Commercial:0.88, Wholesale:0.75, Wholesale_L2:0.65, Wholesale_L3:0.58, OEM:0.50 };
-const QTY_MULT  = { 0:1.0, 1:1.0, 5:0.97, 10:0.93, 25:0.88, 50:0.84, 100:0.80 };
+// ─── AUTH BYPASS — hardcoded admin for production while Supabase migration is in progress ───
+// To restore auth: remove HARDCODED_USER and re-add the GoTrue/Supabase auth gate
+const HARDCODED_USER = {
+  id:   "local-admin",
+  email: "admin@patioproducts.com",
+  name:  "Admin",
+  role:  "admin",
+  accessToken: null,
+};
 
-// ─── GOTRUE AUTH LAYER ────────────────────────────────────────────────────────
-// Uses Netlify Identity's GoTrue API directly — no widget, no race conditions.
-//
-// Endpoints (all relative to /.netlify/identity):
-//   POST /token          — email+password login (grant_type=password)
-//   POST /token          — refresh (grant_type=refresh_token)
-//   POST /logout         — invalidate token (requires Bearer)
-//   POST /verify         — accept invite or recovery token, set password
-//   POST /recover        — send password reset email
-//
-// Role mapping (set in Netlify Identity dashboard → User → Roles):
-//   admin        → all tiers + customer view + sheet view + all exports + sync
-//   manager      → all tiers + customer view (read) + sheet view + CSV export
-//   viewer       → all tiers + sheet view, no exports
-//   commercial   → Commercial tier only + sheet view
-//   wholesale    → Wholesale / Wholesale_L2 / Wholesale_L3 + sheet view
-//   retail       → Retail tier only + sheet view
-//
-// JWT role is in:  token.app_metadata.roles[0]
-// Fallback role if none assigned: "viewer"
+// ─── CATEGORIES TO EXCLUDE FROM SHEET VIEW / PRINT BY DEFAULT ────────────────
+// Edit this list to control which categories are hidden from Sheet View.
+// Users can still reveal them by toggling in the filter UI.
+const DEFAULT_EXCLUDED_CATEGORIES = [
+  "Ottoman",
+  "Double Layer Sling",
+  "Padded Sling",
+  "Standard Sling",
+  "Uncategorized",
+];
 
-const GOTRUE_BASE = "/.netlify/identity";
-
-// Parse a JWT payload without a library
-function parseJwt(token) {
-  try {
-    const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(atob(base64));
-  } catch { return null; }
-}
-
-function extractUserFromToken(tokenData) {
-  // tokenData = { access_token, refresh_token, expires_in, token_type }
-  const payload = parseJwt(tokenData.access_token);
-  if (!payload) return null;
-  const role = payload.app_metadata?.roles?.[0] ?? "viewer";
-  const name = payload.user_metadata?.full_name
-    || payload.user_metadata?.name
-    || payload.email
-    || "User";
-  return {
-    id: payload.sub,
-    email: payload.email,
-    name,
-    role,
-    accessToken: tokenData.access_token,
-    refreshToken: tokenData.refresh_token,
-    expiresAt: Date.now() + (tokenData.expires_in ?? 3600) * 1000,
-  };
-}
-
-// Persist session to sessionStorage so a page refresh doesn't log them out
-const SESSION_KEY = "pm_session";
-function saveSession(tokenData) {
-  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(tokenData)); } catch {}
-}
-function loadSession() {
-  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch { return null; }
-}
-function clearSession() {
-  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
-}
-
+// ─── ROLE CAPABILITIES ────────────────────────────────────────────────────────
 function getRoleCapabilities(role) {
   switch(role) {
-    case "admin":      return {
-      tiers: TIERS,
-      canViewCustomers: true,
-      canViewSheet:     true,
-      canExportCSV:     true,
-      canExportJSON:    true,
-      canExportSage:    true,
-      canSync:          true,
-    };
-    case "manager":    return {
-      tiers: TIERS,
-      canViewCustomers: true,
-      canViewSheet:     true,
-      canExportCSV:     true,
-      canExportJSON:    false,
-      canExportSage:    false,
-      canSync:          false,
-    };
-    case "viewer":     return {
-      tiers: TIERS,
-      canViewCustomers: false,
-      canViewSheet:     true,
-      canExportCSV:     false,
-      canExportJSON:    false,
-      canExportSage:    false,
-      canSync:          false,
-    };
-    case "commercial": return {
-      tiers: ["Commercial"],
-      canViewCustomers: false,
-      canViewSheet:     true,
-      canExportCSV:     false,
-      canExportJSON:    false,
-      canExportSage:    false,
-      canSync:          false,
-    };
-    case "wholesale":  return {
-      tiers: ["Wholesale","Wholesale_L2","Wholesale_L3"],
-      canViewCustomers: false,
-      canViewSheet:     true,
-      canExportCSV:     false,
-      canExportJSON:    false,
-      canExportSage:    false,
-      canSync:          false,
-    };
-    case "retail":     return {
-      tiers: ["Retail"],
-      canViewCustomers: false,
-      canViewSheet:     true,
-      canExportCSV:     false,
-      canExportJSON:    false,
-      canExportSage:    false,
-      canSync:          false,
-    };
-    default:           return {
-      tiers: [],
-      canViewCustomers: false,
-      canViewSheet:     false,
-      canExportCSV:     false,
-      canExportJSON:    false,
-      canExportSage:    false,
-      canSync:          false,
-    };
+    case "admin":      return { tiers:TIERS, canViewCustomers:true,  canViewSheet:true,  canExportCSV:true,  canExportJSON:true,  canExportSage:true,  canSync:true  };
+    case "manager":    return { tiers:TIERS, canViewCustomers:true,  canViewSheet:true,  canExportCSV:true,  canExportJSON:false, canExportSage:false, canSync:false };
+    case "viewer":     return { tiers:TIERS, canViewCustomers:false, canViewSheet:true,  canExportCSV:false, canExportJSON:false, canExportSage:false, canSync:false };
+    case "commercial": return { tiers:["Commercial"], canViewCustomers:false, canViewSheet:true,  canExportCSV:false, canExportJSON:false, canExportSage:false, canSync:false };
+    case "wholesale":  return { tiers:["Wholesale","Wholesale_L2","Wholesale_L3"], canViewCustomers:false, canViewSheet:true, canExportCSV:false, canExportJSON:false, canExportSage:false, canSync:false };
+    case "retail":     return { tiers:["Retail"], canViewCustomers:false, canViewSheet:true, canExportCSV:false, canExportJSON:false, canExportSage:false, canSync:false };
+    default:           return { tiers:[], canViewCustomers:false, canViewSheet:false, canExportCSV:false, canExportJSON:false, canExportSage:false, canSync:false };
   }
 }
 
-// ─── MOCK CUSTOMERS (still in use until real customer data is wired up) ───────
+// ─── MOCK CUSTOMERS ───────────────────────────────────────────────────────────
 const MOCK_CUSTOMERS = [
-  {
-    id:"cust-001", name:"Acme Industrial Supply", tier:"Wholesale",
-    special:{
-      "LUB-PRO-001": { 0:19.99, 5:18.99, 10:17.99, 25:16.99, 50:15.99, 100:14.99 },
-      "ADH-EP-002":  { 0:38.99, 10:36.99, 25:33.99 },
-    }
-  },
-  {
-    id:"cust-002", name:"Bridgewater Maintenance Co.", tier:"Commercial",
-    special:{
-      "GRS-MP-001": { 0:17.50, 5:16.50, 25:14.99 },
-    }
-  },
-  {
-    id:"cust-003", name:"Pacific Coast Contractors", tier:"Wholesale_L2",
-    special:{
-      "COA-EP-001": { 0:42.00, 5:39.00, 25:35.00 },
-      "COA-ZN-001": { 0:29.99, 10:27.99 },
-      "SEA-RTV-001": { 0:7.25, 10:6.50 },
-    }
-  },
+  { id:"cust-001", name:"Acme Industrial Supply", tier:"Wholesale",
+    special:{ "LUB-PRO-001":{0:19.99,5:18.99,10:17.99,25:16.99,50:15.99,100:14.99}, "ADH-EP-002":{0:38.99,10:36.99,25:33.99} } },
+  { id:"cust-002", name:"Bridgewater Maintenance Co.", tier:"Commercial",
+    special:{ "GRS-MP-001":{0:17.50,5:16.50,25:14.99} } },
+  { id:"cust-003", name:"Pacific Coast Contractors", tier:"Wholesale_L2",
+    special:{ "COA-EP-001":{0:42.00,5:39.00,25:35.00}, "COA-ZN-001":{0:29.99,10:27.99}, "SEA-RTV-001":{0:7.25,10:6.50} } },
 ];
 
 // ─── DATA HELPERS ─────────────────────────────────────────────────────────────
 const fmt  = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n);
 const fmtP = n => (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
+
+function decodeEntities(str) {
+  if (!str) return str;
+  return str.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">")
+            .replace(/&quot;/g,'"').replace(/&#039;/g,"'").replace(/&nbsp;/g," ");
+}
 
 function getProducts(data) {
   const map = new Map();
@@ -185,7 +74,7 @@ function getProducts(data) {
       parent_id: r.parent_id, parent_sku: r.parent_sku,
       parent_name: decodeEntities(r.parent_name),
       category: decodeEntities(r.category),
-      image_url: r.image_url,
+      image_url: r.image_url, slug: r.slug,
     });
   });
   return [...map.values()];
@@ -195,15 +84,11 @@ function getVariants(data, parentId) {
   const map = new Map();
   data.filter(r => r.parent_id === parentId).forEach(r => {
     if (!map.has(r.child_id))
-      map.set(r.child_id, {
-        child_id: r.child_id, child_sku: r.child_sku,
-        variant_name: decodeEntities(r.variant_name),
-      });
+      map.set(r.child_id, { child_id:r.child_id, child_sku:r.child_sku, variant_name:decodeEntities(r.variant_name) });
   });
   return [...map.values()];
 }
 
-// { [childId]: { [tier]: { [qty]: price } } }
 function buildMatrix(data, parentId) {
   const m = {};
   data.filter(r => r.parent_id === parentId).forEach(r => {
@@ -214,7 +99,7 @@ function buildMatrix(data, parentId) {
   return m;
 }
 
-// For sheet view: { [childSku]: { parent_sku, parent_name, variant_name, category, [qty]: price } }
+// For sheet view: { [childSku]: { parent_sku, parent_name, variant_name, category, slug, [qty]: price } }
 function getTierFlat(data, tier) {
   const m = {};
   data.filter(r => r.tier === tier).forEach(r => {
@@ -223,32 +108,25 @@ function getTierFlat(data, tier) {
       parent_name: decodeEntities(r.parent_name),
       variant_name: decodeEntities(r.variant_name),
       category: decodeEntities(r.category),
+      slug: r.slug,
     };
     m[r.child_sku][r.qty_break] = r.price;
   });
   return m;
 }
 
-// Build Sage 50 export rows — one row per unique parent_sku
-// Price Level 1 = Wholesale qty_break=0, Level 8 = Commercial, Level 10 = Retail
-// All other levels = 0 (Sage placeholders)
-// TODO: replace parent_sku with sage_item_id mapping once data column exists
-// TODO: filter out variants not in Sage (e.g. bulk/case sizes) once sage_export flag exists
 function buildSageExport(data) {
   const map = {};
   data.forEach(r => {
     if (r.qty_break !== 0) return;
     map[r.parent_sku] ??= {
-      item_id: r.parent_sku,
-      parent_name: decodeEntities(r.parent_name),
-      category: decodeEntities(r.category),
-      price_level_1: 0, price_level_2: 0, price_level_3: 0, price_level_4: 0,
-      price_level_5: 0, price_level_6: 0, price_level_7: 0, price_level_8: 0,
-      price_level_9: 0, price_level_10: 0,
+      item_id:r.parent_sku, parent_name:decodeEntities(r.parent_name), category:decodeEntities(r.category),
+      price_level_1:0,price_level_2:0,price_level_3:0,price_level_4:0,price_level_5:0,
+      price_level_6:0,price_level_7:0,price_level_8:0,price_level_9:0,price_level_10:0,
     };
-    if (r.tier === "Wholesale")  map[r.parent_sku].price_level_1  = r.price;
-    if (r.tier === "Commercial") map[r.parent_sku].price_level_8  = r.price;
-    if (r.tier === "Retail")     map[r.parent_sku].price_level_10 = r.price;
+    if (r.tier==="Wholesale")  map[r.parent_sku].price_level_1 = r.price;
+    if (r.tier==="Commercial") map[r.parent_sku].price_level_8 = r.price;
+    if (r.tier==="Retail")     map[r.parent_sku].price_level_10 = r.price;
   });
   return Object.values(map).sort((a,b) => a.item_id.localeCompare(b.item_id));
 }
@@ -258,48 +136,209 @@ function pctVsWholesale(price, wsPrice) {
   return ((price - wsPrice) / wsPrice) * 100;
 }
 
-// Customer: resolve price for a child_sku at a qty_break
-// qty_break=1 is a sentinel duplicate of 0 — skip it in resolution
 function resolveCustomerPrice(data, customer, childSku, qty) {
   const special = customer.special[childSku];
   if (special) {
-    const specBreaks = Object.keys(special).map(Number)
-      .filter(b => b !== 1)
-      .sort((a,b) => b - a);
+    const specBreaks = Object.keys(special).map(Number).filter(b=>b!==1).sort((a,b)=>b-a);
     const match = specBreaks.find(b => qty >= b);
-    if (match !== undefined) return { price: special[match], isSpecial: true };
+    if (match !== undefined) return { price:special[match], isSpecial:true };
   }
-  // Fall back to tier price — find applicable break dynamically from real data
-  const tierRows = data.filter(r => r.child_sku === childSku && r.tier === customer.tier && r.qty_break !== 1);
-  const applicable = tierRows.map(r => r.qty_break).filter(b => b > 0 && qty >= b);
+  const tierRows = data.filter(r => r.child_sku===childSku && r.tier===customer.tier && r.qty_break!==1);
+  const applicable = tierRows.map(r=>r.qty_break).filter(b=>b>0&&qty>=b);
   const qb = applicable.length ? Math.max(...applicable) : 0;
-  const tierRow = tierRows.find(r => r.qty_break === qb);
-  return { price: tierRow?.price ?? null, isSpecial: false };
-}
-
-// Decode HTML entities in strings from WooCommerce (e.g. &amp; → &)
-function decodeEntities(str) {
-  if (!str) return str;
-  return str
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&nbsp;/g, " ");
+  const tierRow = tierRows.find(r=>r.qty_break===qb);
+  return { price:tierRow?.price??null, isSpecial:false };
 }
 
 function downloadCSV(filename, headers, rows) {
+  const WATERMARK = "CONFIDENTIAL — Property of Patio Products, Inc. Not for distribution.";
   const csv = [
+    `# ${WATERMARK}`,
     headers.join(","),
     ...rows.map(r => r.map(v =>
-      typeof v === "string" && (v.includes(",") || v.includes('"'))
-        ? `"${v.replace(/"/g, '""')}"` : v ?? ""
+      typeof v==="string"&&(v.includes(",")||v.includes('"'))
+        ? `"${v.replace(/"/g,'""')}"` : v??""
     ).join(","))
   ].join("\n");
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+  a.href = URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
   a.download = filename; a.click();
+}
+
+function downloadJSON(filename, payload) {
+  const wrapped = {
+    _watermark: "CONFIDENTIAL — Property of Patio Products, Inc. Not for distribution.",
+    generated: new Date().toISOString(),
+    data: payload,
+  };
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(wrapped,null,2)],{type:"application/json"}));
+  a.download = filename; a.click();
+}
+
+// ─── RED FLAG ANALYSIS ────────────────────────────────────────────────────────
+function computeRedFlags(data) {
+  // Build lookup structures
+  const byParent = {};   // parent_id → [rows]
+  const byChild  = {};   // child_id → [rows]
+  const parentChildCount = {}; // parent_id → Set of child_ids
+
+  data.forEach(r => {
+    (byParent[r.parent_id] ??= []).push(r);
+    (byChild[r.child_id]  ??= []).push(r);
+    (parentChildCount[r.parent_id] ??= new Set()).add(r.child_id);
+  });
+
+  const flags = {}; // parent_id → [flag strings]
+
+  const addFlag = (parentId, msg) => {
+    (flags[parentId] ??= []).push(msg);
+  };
+
+  // Build a product map for metadata
+  const productMeta = {};
+  data.forEach(r => {
+    if (!productMeta[r.parent_id]) productMeta[r.parent_id] = {
+      parent_sku: r.parent_sku,
+      parent_name: decodeEntities(r.parent_name),
+      category: decodeEntities(r.category),
+      image_url: r.image_url,
+      slug: r.slug,
+    };
+  });
+
+  Object.entries(byParent).forEach(([parentId, rows]) => {
+    const childIds = [...(parentChildCount[parentId] || [])];
+
+    // Flag 1: Wholesale regular price is 0 or missing
+    const wsBase = rows.find(r => r.tier==="Wholesale" && r.qty_break===0);
+    if (!wsBase || !wsBase.price || wsBase.price === 0) {
+      addFlag(parentId, "Missing or zero Wholesale base price");
+    }
+
+    // Flag 2: qty_break 0 price ≠ qty_break 1 price for same product+tier+child
+    const tierChildCombos = new Map();
+    rows.forEach(r => {
+      const key = `${r.child_id}__${r.tier}`;
+      (tierChildCombos.get(key) || tierChildCombos.set(key,{}).get(key))[r.qty_break] = r.price;
+    });
+    tierChildCombos.forEach((prices, key) => {
+      if (prices[0] != null && prices[1] != null && prices[0] !== prices[1]) {
+        const tier = key.split("__")[1];
+        addFlag(parentId, `qty_break 0 ≠ qty_break 1 (${tier}) — sentinel mismatch`);
+      }
+    });
+
+    // Flag 3: Wholesale_L2 base price 0 or missing
+    const wsl2Base = rows.find(r => r.tier==="Wholesale_L2" && r.qty_break===0);
+    if (!wsl2Base || !wsl2Base.price || wsl2Base.price === 0) {
+      addFlag(parentId, "Missing or zero Wholesale_L2 base price");
+    }
+
+    // Flag 4: Wholesale_L3 base price 0 or missing
+    const wsl3Base = rows.find(r => r.tier==="Wholesale_L3" && r.qty_break===0);
+    if (!wsl3Base || !wsl3Base.price || wsl3Base.price === 0) {
+      addFlag(parentId, "Missing or zero Wholesale_L3 base price");
+    }
+
+    // Flag 5: No quantity discounts for a given tier (only one qty break ≠ 0)
+    const tierBreaks = {};
+    rows.forEach(r => {
+      if (r.qty_break === 1) return; // skip sentinel
+      (tierBreaks[r.tier] ??= new Set()).add(r.qty_break);
+    });
+    TIERS.forEach(tier => {
+      const breaks = [...(tierBreaks[tier]||[])].filter(b=>b!==0);
+      if (breaks.length === 0 && tierBreaks[tier]?.has(0)) {
+        addFlag(parentId, `No quantity discounts for ${tier}`);
+      }
+    });
+
+    // Flag 6: Variable product with only 1 variant (parent_id ≠ child_id but no siblings)
+    if (childIds.length === 1 && childIds[0] !== parentId) {
+      addFlag(parentId, "Variable product with only 1 variant");
+    }
+
+    // Flag 7: Retail > Commercial > Wholesale price order violated
+    const ret = rows.find(r=>r.tier==="Retail"&&r.qty_break===0)?.price;
+    const com = rows.find(r=>r.tier==="Commercial"&&r.qty_break===0)?.price;
+    const ws  = rows.find(r=>r.tier==="Wholesale"&&r.qty_break===0)?.price;
+    if (ret!=null && com!=null && ws!=null) {
+      if (!(ret > com && com > ws)) {
+        addFlag(parentId, `Price tier order violated: Retail(${fmt(ret)}) > Commercial(${fmt(com)}) > Wholesale(${fmt(ws)}) not satisfied`);
+      }
+    }
+
+    // Flag 8: Statistical outlier — price deviates >40% from median within product+tier qty ladder
+    childIds.forEach(childId => {
+      TIERS.forEach(tier => {
+        const priceRows = rows.filter(r => r.child_id===childId && r.tier===tier && r.qty_break!==1 && r.price!=null && r.price > 0);
+        if (priceRows.length < 3) return;
+        const prices = priceRows.map(r=>r.price).sort((a,b)=>a-b);
+        const mid = Math.floor(prices.length/2);
+        const median = prices.length%2===0 ? (prices[mid-1]+prices[mid])/2 : prices[mid];
+        priceRows.forEach(r => {
+          const dev = Math.abs(r.price - median) / median;
+          if (dev > 0.40) {
+            addFlag(parentId, `Possible price typo: ${tier} qty_break=${r.qty_break} = ${fmt(r.price)} (median ${fmt(median)}, ${(dev*100).toFixed(0)}% off)`);
+          }
+        });
+      });
+    });
+
+    // Flag 9: Image URL missing
+    const meta = productMeta[parentId];
+    if (!meta?.image_url || meta.image_url.trim()==="") {
+      addFlag(parentId, "Missing image URL");
+    }
+
+    // Flag 10: Price does not decrease as qty increases (within same tier+child)
+    childIds.forEach(childId => {
+      TIERS.forEach(tier => {
+        const priceRows = rows
+          .filter(r=>r.child_id===childId && r.tier===tier && r.qty_break!==1 && r.price!=null)
+          .sort((a,b)=>a.qty_break-b.qty_break);
+        for (let i=1; i<priceRows.length; i++) {
+          if (priceRows[i].price > priceRows[i-1].price) {
+            addFlag(parentId, `${tier}: price increases at qty ${priceRows[i].qty_break} vs ${priceRows[i-1].qty_break}`);
+            break;
+          }
+        }
+      });
+    });
+
+    // Flag 11: Duplicate child SKUs across different parents (detected per-row in a global pass below)
+    // Flag 12: Category is Uncategorized
+    if (!productMeta[parentId]?.category || productMeta[parentId].category.toLowerCase()==="uncategorized") {
+      addFlag(parentId, "Category is Uncategorized");
+    }
+
+    // Flag 13: Variant name is blank on a multi-variant product
+    const blankVariant = rows.find(r => !r.variant_name || r.variant_name.trim()==="");
+    if (blankVariant && childIds.length > 1) {
+      addFlag(parentId, "Blank variant name on multi-variant product");
+    }
+  });
+
+  // Flag 11 (global): child SKU appears under multiple parent IDs
+  const skuParents = {};
+  data.forEach(r => {
+    (skuParents[r.child_sku] ??= new Set()).add(r.parent_id);
+  });
+  Object.entries(skuParents).forEach(([sku, parents]) => {
+    if (parents.size > 1) {
+      [...parents].forEach(pid => {
+        addFlag(pid, `Child SKU ${sku} appears in ${parents.size} different parent products`);
+      });
+    }
+  });
+
+  // Return as array of {parent_id, flags[], ...meta}
+  return Object.entries(flags).map(([parentId, flagList]) => ({
+    parent_id: parentId,
+    ...productMeta[parentId],
+    flags: [...new Set(flagList)], // deduplicate
+  })).sort((a,b) => (b.flags.length - a.flags.length));
 }
 
 // ─── CSS ──────────────────────────────────────────────────────────────────────
@@ -307,69 +346,36 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Syne:wght@600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
-/* ── LIGHT MODE (default) ── */
+/* ── LIGHT MODE ── */
 :root{
-  --bg:#e8ecf0;
-  --s1:#f0f3f6;
-  --s2:#e2e7ec;
-  --s3:#d4dbe3;
-  --s4:#c6d0da;
-  --b1:#c0cad5;
-  --b2:#aab6c4;
-  --b3:#8fa0b2;
-  --brand:#3a7d58;
-  --brand-lt:#489367;
-  --brand-dim:rgba(72,147,103,.12);
-  --coral:#ff5f84;
-  --coral-dim:rgba(255,95,132,.12);
-  --text:#1a2530;
-  --t2:#4a5f70;
-  --t3:#7a8fa0;
-  --t4:#b0bfcc;
-  --ws:#2d6e47;
-  --ws-bg:rgba(72,147,103,.1);
-  --above:#c94040;
-  --above-bg:rgba(201,64,64,.1);
-  --below:#2d7a5a;
-  --below-bg:rgba(45,122,90,.1);
-  --gold:#8a6800;
-  --gold-bg:rgba(138,104,0,.08);
-  --err:#c94040;
-  --err-bg:rgba(201,64,64,.08);
+  --bg:#e8ecf0;--s1:#f0f3f6;--s2:#e2e7ec;--s3:#d4dbe3;--s4:#c6d0da;
+  --b1:#c0cad5;--b2:#aab6c4;--b3:#8fa0b2;
+  --brand:#3a7d58;--brand-lt:#489367;--brand-dim:rgba(72,147,103,.12);
+  --coral:#ff5f84;--coral-dim:rgba(255,95,132,.12);
+  --text:#1a2530;--t2:#4a5f70;--t3:#7a8fa0;--t4:#b0bfcc;
+  --ws:#2d6e47;--ws-bg:rgba(72,147,103,.1);
+  --above:#c94040;--above-bg:rgba(201,64,64,.1);
+  --below:#2d7a5a;--below-bg:rgba(45,122,90,.1);
+  --gold:#8a6800;--gold-bg:rgba(138,104,0,.08);
+  --err:#c94040;--err-bg:rgba(201,64,64,.08);
+  --warn:#c97a00;--warn-bg:rgba(201,122,0,.08);
   --fd:'Syne',sans-serif;--fm:'DM Mono',monospace;--fb:'DM Sans',sans-serif;
-  --r:7px;
-  --shadow:0 1px 4px rgba(0,0,0,.08),0 4px 16px rgba(0,0,0,.06);
+  --r:7px;--shadow:0 1px 4px rgba(0,0,0,.08),0 4px 16px rgba(0,0,0,.06);
 }
 
 /* ── DARK MODE ── */
 .dark{
-  --bg:#0d1117;
-  --s1:#161c24;
-  --s2:#1c2430;
-  --s3:#212c3a;
-  --s4:#283444;
-  --b1:#2a3a4a;
-  --b2:#344a5e;
-  --b3:#3d5870;
-  --brand:#489367;
-  --brand-lt:#5aad7a;
-  --brand-dim:rgba(72,147,103,.15);
-  --coral:#ff5f84;
-  --coral-dim:rgba(255,95,132,.15);
-  --text:#dce6f0;
-  --t2:#7a9ab0;
-  --t3:#4a6478;
-  --t4:#2a3c4e;
-  --ws:#5aad7a;
-  --ws-bg:rgba(90,173,122,.1);
-  --above:#ff7a7a;
-  --above-bg:rgba(255,122,122,.1);
-  --below:#4cc9f0;
-  --below-bg:rgba(76,201,240,.1);
-  --gold:#f0c040;
-  --gold-bg:rgba(240,192,64,.1);
-  --err:#ff7a7a;
-  --err-bg:rgba(255,122,122,.1);
+  --bg:#0d1117;--s1:#161c24;--s2:#1c2430;--s3:#212c3a;--s4:#283444;
+  --b1:#2a3a4a;--b2:#344a5e;--b3:#3d5870;
+  --brand:#489367;--brand-lt:#5aad7a;--brand-dim:rgba(72,147,103,.15);
+  --coral:#ff5f84;--coral-dim:rgba(255,95,132,.15);
+  --text:#dce6f0;--t2:#7a9ab0;--t3:#4a6478;--t4:#2a3c4e;
+  --ws:#5aad7a;--ws-bg:rgba(90,173,122,.1);
+  --above:#ff7a7a;--above-bg:rgba(255,122,122,.1);
+  --below:#4cc9f0;--below-bg:rgba(76,201,240,.1);
+  --gold:#f0c040;--gold-bg:rgba(240,192,64,.1);
+  --err:#ff7a7a;--err-bg:rgba(255,122,122,.1);
+  --warn:#f0a040;--warn-bg:rgba(240,160,64,.1);
   --shadow:0 2px 8px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.2);
 }
 
@@ -377,12 +383,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .app{display:flex;flex-direction:column;height:100vh}
 
 /* ── TOPBAR ── */
-.topbar{
-  height:52px;padding:0 20px;
-  background:var(--s1);border-bottom:1px solid var(--b1);
-  display:flex;align-items:center;gap:16px;flex-shrink:0;z-index:100;
-  box-shadow:var(--shadow);
-}
+.topbar{height:52px;padding:0 20px;background:var(--s1);border-bottom:1px solid var(--b1);display:flex;align-items:center;gap:16px;flex-shrink:0;z-index:100;box-shadow:var(--shadow);}
 .logo{width:30px;height:30px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--brand);}
 .logo img{width:30px;height:30px;object-fit:contain;mix-blend-mode:multiply;}
 .dark .logo img{mix-blend-mode:normal;opacity:.85;}
@@ -396,10 +397,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .topbar-end{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0}
 .theme-btn{width:32px;height:32px;border-radius:6px;border:1px solid var(--b2);background:var(--s3);color:var(--t2);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;}
 .theme-btn:hover{background:var(--s4);color:var(--text)}
-.user-chip{display:flex;align-items:center;gap:7px;padding:4px 10px 4px 5px;border-radius:20px;background:var(--s3);border:1px solid var(--b2);cursor:pointer;font-size:11px;font-family:var(--fm);color:var(--t2);transition:all .15s;}
-.user-chip:hover{background:var(--s4);color:var(--text)}
-.user-avatar{width:22px;height:22px;border-radius:50%;background:var(--brand);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;flex-shrink:0;}
-.role-badge{padding:2px 6px;border-radius:20px;font-size:9px;font-family:var(--fm);background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.3);text-transform:uppercase;letter-spacing:.06em;}
 
 /* ── BODY LAYOUT ── */
 .body{flex:1;display:flex;overflow:hidden}
@@ -420,7 +417,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .tleg-row{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--t2)}
 .tdot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .ws-tag{font-family:var(--fm);font-size:8px;color:var(--brand);margin-left:auto}
-.oem-note{font-family:var(--fm);font-size:9px;color:var(--t3);margin-top:8px;line-height:1.5}
 
 /* ── MAIN AREA ── */
 .main{flex:1;display:flex;overflow:hidden}
@@ -430,6 +426,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .pcard{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);overflow:hidden;cursor:pointer;transition:border-color .18s,box-shadow .18s,transform .18s;box-shadow:var(--shadow);min-height:80px;}
 .pcard:hover{border-color:var(--brand);transform:translateY(-1px);box-shadow:0 4px 16px rgba(72,147,103,.18)}
 .pcard.on{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-dim)}
+.pcard-flag{position:absolute;top:6px;right:6px;background:var(--err);color:#fff;font-size:8px;font-family:var(--fm);padding:2px 5px;border-radius:3px;z-index:2;}
 .pcard-img-wrap{width:100%;height:110px;overflow:hidden;background:var(--s3);position:relative;flex-shrink:0}
 .pcard-img{width:100%;height:110px;object-fit:cover;display:block}
 .pcard-img-ph{width:100%;height:110px;position:absolute;top:0;left:0;display:none;align-items:center;justify-content:center;background:var(--s3);font-family:var(--fd);font-size:32px;font-weight:800;color:var(--brand);opacity:.25;letter-spacing:-1px;}
@@ -463,6 +460,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .btn-a:hover{background:var(--brand-lt);border-color:var(--brand-lt)}
 .btn-o{background:transparent;border-color:rgba(72,147,103,.4);color:var(--brand)}
 .btn-o:hover{background:var(--brand-dim)}
+.btn-warn{background:transparent;border-color:rgba(201,64,64,.4);color:var(--err)}
+.btn-warn.on{background:var(--err-bg)}
 .row-count{font-family:var(--fm);font-size:10px;color:var(--t3);margin-left:auto}
 
 /* CALC */
@@ -506,6 +505,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .vbadge{padding:2px 7px;border-radius:20px;font-size:9px;background:var(--s3);color:var(--t2);font-family:var(--fm);border:1px solid var(--b1)}
 .skubadge{font-size:9px;color:var(--t3);font-family:var(--fm)}
 
+/* ── FLAGS ── */
+.flag-panel{padding:10px 18px;border-bottom:1px solid var(--b1);background:var(--err-bg);flex-shrink:0}
+.flag-list{display:flex;flex-direction:column;gap:3px;margin-top:6px;max-height:120px;overflow-y:auto}
+.flag-item{font-family:var(--fm);font-size:10px;color:var(--err);display:flex;gap:5px;align-items:flex-start}
+.flag-item::before{content:"▲";font-size:8px;margin-top:2px;flex-shrink:0}
+.flag-badge{display:inline-flex;align-items:center;justify-content:center;background:var(--err);color:#fff;font-family:var(--fm);font-size:9px;font-weight:700;padding:1px 5px;border-radius:20px;min-width:18px;}
+.flag-row-badge{background:var(--err-bg);border:1px solid rgba(201,64,64,.3);color:var(--err);font-family:var(--fm);font-size:8px;padding:1px 5px;border-radius:3px;white-space:nowrap;}
+
 /* NO SELECTION */
 .nosel{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--t3)}
 .nosel-icon{font-size:36px;opacity:.2}
@@ -518,7 +525,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .tier-pills{display:flex;gap:4px;flex-wrap:wrap}
 .tier-pill{padding:4px 11px;border-radius:20px;border:1px solid var(--b2);font-size:11px;font-family:var(--fm);cursor:pointer;background:transparent;color:var(--t3);transition:all .15s;white-space:nowrap;}
 .tier-pill:hover{color:var(--t2);background:var(--s3)}
-.sheet-cnt{font-family:var(--fm);font-size:10px;color:var(--t3);margin-left:auto;white-space:nowrap}
+.sheet-cnt{font-family:var(--fm);font-size:10px;color:var(--t3);white-space:nowrap}
 .sheet-cnt span{color:var(--brand);font-weight:500}
 .sheet-wrap{flex:1;overflow:auto;background:var(--bg)}
 .st{border-collapse:collapse;font-family:var(--fm);font-size:11px;white-space:nowrap;width:auto}
@@ -533,6 +540,17 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .s-price-base{color:var(--text);font-weight:500}
 .s-price-qty{color:var(--t2)}
 .cat-hdr td{padding:5px 12px;background:var(--s3);border-bottom:1px solid var(--b2);border-top:1px solid var(--b2);font-family:var(--fd);font-size:9px;color:var(--brand);font-weight:700;letter-spacing:.1em;text-transform:uppercase;}
+
+/* Cat multi-select dropdown */
+.cat-multi-wrap{position:relative}
+.cat-multi-btn{padding:5px 10px;border-radius:6px;border:1px solid var(--b2);background:var(--s2);color:var(--t2);font-family:var(--fm);font-size:11px;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px}
+.cat-multi-btn:hover{background:var(--s3)}
+.cat-multi-btn.has-excl{border-color:var(--brand);color:var(--brand)}
+.cat-multi-drop{position:absolute;top:calc(100% + 4px);left:0;background:var(--s1);border:1px solid var(--b2);border-radius:8px;padding:6px;z-index:200;box-shadow:var(--shadow);min-width:220px;max-height:320px;overflow-y:auto}
+.cat-multi-item{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:11px;font-family:var(--fb);color:var(--t2);transition:background .1s;user-select:none}
+.cat-multi-item:hover{background:var(--s3);color:var(--text)}
+.cat-multi-item.excl{color:var(--err);text-decoration:line-through;opacity:.7}
+.cat-multi-sep{height:1px;background:var(--b1);margin:5px 0}
 
 /* ── CUSTOMER VIEW ── */
 .custv{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -551,33 +569,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .c-price-qty{color:var(--text)}
 .c-price-nil{color:var(--t4)}
 
-/* ── AUTH GATE ── */
-.auth-wrap{flex:1;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 40%, var(--brand-dim) 0%, transparent 60%);}
-.auth-card{width:360px;background:var(--s1);border:1px solid var(--b2);border-radius:12px;padding:32px;display:flex;flex-direction:column;align-items:center;gap:14px;box-shadow:var(--shadow);}
-.auth-logo{width:52px;height:52px;border-radius:10px;background:var(--brand);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
-.auth-logo img{width:52px;height:52px;object-fit:contain;mix-blend-mode:multiply;}
-.dark .auth-logo img{mix-blend-mode:normal;opacity:.85;}
-.auth-logo-fallback{font-family:var(--fd);font-weight:800;font-size:22px;color:#fff;}
-.auth-title{font-family:var(--fd);font-weight:700;font-size:20px;text-align:center;color:var(--text)}
-.auth-sub{font-size:12px;color:var(--t2);text-align:center;line-height:1.6;max-width:260px}
-.auth-mode-lbl{font-family:var(--fm);font-size:10px;color:var(--brand);text-transform:uppercase;letter-spacing:.1em;}
-.auth-form{width:100%;display:flex;flex-direction:column;gap:10px;}
-.auth-field{display:flex;flex-direction:column;gap:4px;}
-.auth-label{font-family:var(--fm);font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;}
-.auth-input{width:100%;padding:9px 12px;background:var(--s2);border:1px solid var(--b2);border-radius:7px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;transition:border-color .2s;}
-.auth-input:focus{border-color:var(--brand);}
-.auth-input::placeholder{color:var(--t3)}
-.auth-btn{width:100%;padding:11px;border-radius:7px;border:none;background:var(--brand);color:#fff;font-family:var(--fd);font-weight:700;font-size:14px;cursor:pointer;transition:background .2s;display:flex;align-items:center;justify-content:center;gap:8px;}
-.auth-btn:hover:not(:disabled){background:var(--brand-lt)}
-.auth-btn:disabled{opacity:.6;cursor:not-allowed}
-.auth-btn-spinner{width:14px;height:14px;border-radius:50%;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;animation:spin .6s linear infinite;flex-shrink:0;}
-.auth-err{width:100%;padding:8px 12px;border-radius:6px;background:var(--err-bg);border:1px solid rgba(201,64,64,.2);color:var(--err);font-size:12px;font-family:var(--fb);}
-.auth-success{width:100%;padding:8px 12px;border-radius:6px;background:var(--brand-dim);border:1px solid rgba(72,147,103,.25);color:var(--brand);font-size:12px;font-family:var(--fb);}
-.auth-switch{display:flex;justify-content:center;margin-top:2px;}
-.auth-link{background:none;border:none;color:var(--t2);font-size:12px;font-family:var(--fb);cursor:pointer;text-decoration:underline;text-underline-offset:3px;transition:color .15s;}
-.auth-link:hover{color:var(--brand)}
-
-/* ── LOADING / ERROR STATES ── */
+/* ── LOADING ── */
 .loading-wrap{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;}
 .spinner{width:36px;height:36px;border-radius:50%;border:3px solid var(--b2);border-top-color:var(--brand);animation:spin .7s linear infinite;}
 
@@ -595,8 +587,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 @keyframes fi{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+/* ── WATERMARK ── */
+.watermark-bar{
+  background:rgba(201,64,64,.06);border-bottom:1px solid rgba(201,64,64,.15);
+  padding:4px 14px;display:flex;align-items:center;gap:8px;
+  font-family:var(--fm);font-size:9px;color:var(--err);letter-spacing:.04em;
+  flex-shrink:0;
+}
+.dark .watermark-bar{background:rgba(201,64,64,.08)}
+
+/* ── PRINT STYLES ── */
 @media print{
-  .topbar,.sidebar,.det-acts,.det-close,.ttabs,.calc,.auth-wrap,.theme-btn{display:none!important}
+  .topbar,.sidebar,.det-acts,.det-close,.ttabs,.calc,.theme-btn,
+  .sheet-bar,.cust-bar,.no-print,.watermark-bar{display:none!important}
   .body,.main{display:block!important;height:auto!important;overflow:visible!important}
   .detail{width:100%!important;border:none!important}
   .grid{display:none!important}
@@ -604,403 +607,240 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .pt th,.pt td{border-color:#ddd!important}
   .pc-ws,.pc-above,.pc-below,.pc-qty{color:#000!important}
   .pct{display:none!important}
-  .cust-bar,.demo-banner{display:none!important}
   .custv{display:block!important;height:auto!important}
-  .cust-wrap{overflow:visible!important;height:auto!important}
-  .ct th,.ct td{border-color:#ddd!important;color:#000!important;background:#fff!important}
+  .cust-wrap,.sheet-wrap{overflow:visible!important;height:auto!important}
+  .ct th,.ct td,.st th,.st td{border-color:#ddd!important;color:#000!important;background:#fff!important}
   .cat-hdr td{background:#f0f0f0!important;color:#333!important}
-  .no-print{display:none!important}
-  .print-cust-hdr{display:block!important}
+  .sheet{display:block!important;height:auto!important}
+  .print-hdr{display:block!important}
+  .print-watermark{display:block!important}
+  .st{page-break-inside:auto}
+  .st tr{page-break-inside:avoid}
+  .cat-hdr{page-break-after:avoid}
 }
+.print-hdr{display:none;padding:0 0 14px 0}
+.print-hdr h1{font-family:'Syne',sans-serif;font-size:18px;color:#000;margin-bottom:3px}
+.print-hdr p{font-size:11px;color:#555;font-family:'DM Sans',sans-serif}
+.print-watermark{display:none;margin-top:12px;padding:7px 10px;border:1px solid #ddd;border-radius:4px;font-family:'DM Mono',monospace;font-size:9px;color:#999;text-align:center}
 .print-cust-hdr{display:none;padding:0 0 18px 0}
-.print-cust-hdr h1{font-family:var(--fd);font-size:20px;color:#000;margin-bottom:4px}
-.print-cust-hdr p{font-size:12px;color:#666;font-family:var(--fb)}
+.print-cust-hdr h1{font-family:'Syne',sans-serif;font-size:20px;color:#000;margin-bottom:4px}
+.print-cust-hdr p{font-size:12px;color:#666;font-family:'DM Sans',sans-serif}
 `;
 
-// ─── PCT BADGE ────────────────────────────────────────────────────────────────
-function PctBadge({ price, wsPrice }) {
-  if (wsPrice == null || wsPrice === 0) return null;
-  const p = ((price - wsPrice) / wsPrice) * 100;
-  if (!isFinite(p) || isNaN(p)) return null;
-  if (Math.abs(p) < 0.05) return <span className="pct pct-ws">WS</span>;
-  return <span className={`pct ${p > 0 ? "pct-up" : "pct-down"}`}>{fmtP(p)}</span>;
-}
-
-// ─── LOGO COMPONENT ───────────────────────────────────────────────────────────
+// ─── LOGO ─────────────────────────────────────────────────────────────────────
 const LOGO_URL = "https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png";
 
-function LogoImg({ size = 30, className = "logo" }) {
+function LogoImg({ size=30, className="logo" }) {
   const [err, setErr] = useState(false);
   return (
-    <div className={className} style={size !== 30 ? { width: size, height: size } : {}}>
+    <div className={className} style={size!==30?{width:size,height:size}:{}}>
       {!err
-        ? <img src={LOGO_URL} alt="Patio Products" onError={() => setErr(true)} />
-        : <span className={className === "auth-logo" ? "auth-logo-fallback" : "logo-fallback"}>W</span>
+        ? <img src={LOGO_URL} alt="Patio Products" onError={()=>setErr(true)}/>
+        : <span className={className==="auth-logo"?"auth-logo-fallback":"logo-fallback"}>W</span>
       }
     </div>
   );
 }
 
-// ─── AUTH GATE ────────────────────────────────────────────────────────────────
-// Modes:
-//   "login"       — email + password
-//   "reset"       — enter email to receive reset link
-//   "set_pass"    — set a new password (after invite or recovery link)
-//   "reset_sent"  — confirmation screen after sending reset email
+// ─── PCT BADGE ────────────────────────────────────────────────────────────────
+function PctBadge({ price, wsPrice }) {
+  if (wsPrice==null||wsPrice===0) return null;
+  const p = ((price-wsPrice)/wsPrice)*100;
+  if (!isFinite(p)||isNaN(p)) return null;
+  if (Math.abs(p)<0.05) return <span className="pct pct-ws">WS</span>;
+  return <span className={`pct ${p>0?"pct-up":"pct-down"}`}>{fmtP(p)}</span>;
+}
 
-function AuthGate({ onLogin, dark, setDark }) {
-  const [mode,      setMode]      = useState("login");
-  const [hashToken, setHashToken] = useState(null);
-  const [tokenType, setTokenType] = useState(null); // "invite" | "recovery"
-  const [email,     setEmail]     = useState("");
-  const [password,  setPassword]  = useState("");
-  const [password2, setPassword2] = useState("");
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState("");
-  const [showPw,    setShowPw]    = useState(false);
+// ─── WATERMARK BAR ────────────────────────────────────────────────────────────
+function WatermarkBar() {
+  return (
+    <div className="watermark-bar no-print">
+      🔒 CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
+    </div>
+  );
+}
 
-  // Detect invite_token or recovery_token in URL hash on mount
+// ─── CATEGORY MULTI-SELECT ────────────────────────────────────────────────────
+function CategoryMultiSelect({ categories, excluded, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
   useEffect(() => {
-    const hash = window.location.hash.slice(1);
-    const params = new URLSearchParams(hash);
-    const inv = params.get("invite_token");
-    const rec = params.get("recovery_token");
-    if (inv) {
-      setHashToken(inv);
-      setTokenType("invite");
-      setMode("set_pass");
-      history.replaceState(null, "", window.location.pathname + window.location.search);
-    } else if (rec) {
-      setHashToken(rec);
-      setTokenType("recovery");
-      setMode("set_pass");
-      history.replaceState(null, "", window.location.pathname + window.location.search);
-    }
+    function handler(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  async function handleLogin(e) {
-    e.preventDefault();
-    if (!email || !password) { setError("Please enter your email and password."); return; }
-    setLoading(true); setError("");
-    try {
-      const res = await fetch(`${GOTRUE_BASE}/token?grant_type=password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error_description || data.msg || "Login failed. Check your email and password.");
-      } else {
-        saveSession(data);
-        const user = extractUserFromToken(data);
-        if (user) onLogin(user);
-        else setError("Login succeeded but could not read user data. Please contact your administrator.");
-      }
-    } catch {
-      setError("Network error — please check your connection and try again.");
-    }
-    setLoading(false);
+  function toggle(cat) {
+    const next = new Set(excluded);
+    if (next.has(cat)) next.delete(cat);
+    else next.add(cat);
+    onChange(next);
   }
 
-  async function handleResetRequest(e) {
-    e.preventDefault();
-    if (!email) { setError("Please enter your email address."); return; }
-    setLoading(true); setError("");
-    try {
-      await fetch(`${GOTRUE_BASE}/recover`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      // GoTrue returns 200 even for unknown emails (security by design)
-      setMode("reset_sent");
-    } catch {
-      setError("Network error — please try again.");
-    }
-    setLoading(false);
-  }
-
-  async function handleSetPassword(e) {
-    e.preventDefault();
-    if (!password) { setError("Please enter a new password."); return; }
-    if (password !== password2) { setError("Passwords don't match."); return; }
-    if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
-    setLoading(true); setError("");
-    try {
-      // Recovery flow: verify the token → get a session → log straight in.
-      // NOTE: Invite flow has been removed. New users are created via the admin
-      // "Create User" panel (/.netlify/functions/create-user) and notified of
-      // their temp password manually. They then use Forgot Password to set their own.
-      // The Netlify hosted GoTrue instance does not persist passwords set via
-      // the invite/verify path regardless of approach tried.
-      const verifyRes = await fetch(`${GOTRUE_BASE}/verify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "recovery",
-          token: hashToken,
-          password,
-        }),
-      });
-      const verifyData = await verifyRes.json();
-      if (!verifyRes.ok) {
-        setError(verifyData.error_description || verifyData.msg || "Reset link is invalid or expired. Please request a new one.");
-        setLoading(false); return;
-      }
-      saveSession(verifyData);
-      const user = extractUserFromToken(verifyData);
-      if (user) onLogin(user);
-      else setError("Password updated — please sign in with your new password.");
-    } catch {
-      setError("Network error — please try again.");
-    }
-    setLoading(false);
-  }
+  const visCount = categories.length - excluded.size;
+  const hasCustom = excluded.size > 0;
 
   return (
-    <div className="auth-wrap fade">
-      <div className="auth-card">
-        <LogoImg size={52} className="auth-logo" />
-        <div className="auth-title">PriceMatrix</div>
-
-        {mode === "login" && (
-          <>
-            <p className="auth-sub">Sign in with your company account to access pricing.</p>
-            <form className="auth-form" onSubmit={handleLogin}>
-              {error && <div className="auth-err">{error}</div>}
-              <div className="auth-field">
-                <label className="auth-label">Email</label>
-                <input className="auth-input" type="email" placeholder="you@patioproducts.com"
-                  value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" autoFocus />
-              </div>
-              <div className="auth-field">
-                <label className="auth-label">Password</label>
-                <div style={{position:"relative"}}>
-                  <input className="auth-input" type={showPw?"text":"password"} placeholder="••••••••"
-                    value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password"
-                    style={{paddingRight:36}} />
-                  <button type="button" onClick={()=>setShowPw(s=>!s)}
-                    style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",fontSize:13,padding:2}}>
-                    {showPw?"🙈":"👁"}
-                  </button>
-                </div>
-              </div>
-              <button className="auth-btn" type="submit" disabled={loading}>
-                {loading && <span className="auth-btn-spinner" />}
-                {loading ? "Signing in…" : "Sign In"}
-              </button>
-              <div className="auth-switch">
-                <button type="button" className="auth-link"
-                  onClick={() => { setMode("reset"); setError(""); }}>
-                  Forgot password?
-                </button>
-              </div>
-            </form>
-          </>
-        )}
-
-        {mode === "reset" && (
-          <>
-            <p className="auth-sub">Enter your email and we'll send you a password reset link.</p>
-            <form className="auth-form" onSubmit={handleResetRequest}>
-              {error && <div className="auth-err">{error}</div>}
-              <div className="auth-field">
-                <label className="auth-label">Email</label>
-                <input className="auth-input" type="email" placeholder="you@patioproducts.com"
-                  value={email} onChange={e => setEmail(e.target.value)} autoFocus />
-              </div>
-              <button className="auth-btn" type="submit" disabled={loading}>
-                {loading && <span className="auth-btn-spinner" />}
-                {loading ? "Sending…" : "Send Reset Link"}
-              </button>
-              <div className="auth-switch">
-                <button type="button" className="auth-link"
-                  onClick={() => { setMode("login"); setError(""); }}>
-                  ← Back to sign in
-                </button>
-              </div>
-            </form>
-          </>
-        )}
-
-        {mode === "reset_sent" && (
-          <>
-            <p className="auth-sub">Check your email — if an account exists for that address, a reset link is on its way.</p>
-            <div className="auth-success">Reset link sent. Follow the link in the email to set a new password.</div>
-            <div className="auth-switch" style={{ marginTop: 8 }}>
-              <button type="button" className="auth-link"
-                onClick={() => { setMode("login"); setError(""); setEmail(""); setPassword(""); }}>
-                ← Back to sign in
-              </button>
+    <div className="cat-multi-wrap" ref={ref}>
+      <button className={`cat-multi-btn ${hasCustom?"has-excl":""}`} onClick={()=>setOpen(o=>!o)}>
+        ⊞ Categories {hasCustom ? `(${excluded.size} hidden)` : ""} ▾
+      </button>
+      {open && (
+        <div className="cat-multi-drop">
+          <div style={{padding:"2px 8px 6px",fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>
+            Showing {visCount} of {categories.length} — click to hide/show
+          </div>
+          <div className="cat-multi-sep"/>
+          <div style={{display:"flex",gap:5,padding:"2px 4px 6px"}}>
+            <button className="btn" style={{fontSize:9,padding:"2px 7px"}} onClick={()=>onChange(new Set(DEFAULT_EXCLUDED_CATEGORIES.filter(c=>categories.includes(c))))}>Reset defaults</button>
+            <button className="btn" style={{fontSize:9,padding:"2px 7px"}} onClick={()=>onChange(new Set())}>Show all</button>
+          </div>
+          <div className="cat-multi-sep"/>
+          {categories.map(cat => (
+            <div key={cat} className={`cat-multi-item ${excluded.has(cat)?"excl":""}`} onClick={()=>toggle(cat)}>
+              <span style={{fontSize:12}}>{excluded.has(cat)?"☐":"☑"}</span>
+              <span>{cat}</span>
             </div>
-          </>
-        )}
-
-        {mode === "set_pass" && (
-          <>
-            <div className="auth-mode-lbl">{tokenType === "invite" ? "Accept invite" : "Reset password"}</div>
-            <p className="auth-sub">
-              {tokenType === "invite"
-                ? "Welcome! Set a password to activate your account."
-                : "Choose a new password for your account."}
-            </p>
-            <form className="auth-form" onSubmit={handleSetPassword}>
-              {error && <div className="auth-err">{error}</div>}
-              <div className="auth-field">
-                <label className="auth-label">New Password</label>
-                <div style={{position:"relative"}}>
-                  <input className="auth-input" type={showPw?"text":"password"} placeholder="8+ characters"
-                    value={password} onChange={e => setPassword(e.target.value)} autoFocus autoComplete="new-password"
-                    style={{paddingRight:36}} />
-                  <button type="button" onClick={()=>setShowPw(s=>!s)}
-                    style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--t3)",fontSize:13,padding:2}}>
-                    {showPw?"🙈":"👁"}
-                  </button>
-                </div>
-              </div>
-              <div className="auth-field">
-                <label className="auth-label">Confirm Password</label>
-                <input className="auth-input" type="password" placeholder="Confirm password"
-                  value={password2} onChange={e => setPassword2(e.target.value)} autoComplete="new-password" />
-              </div>
-              <button className="auth-btn" type="submit" disabled={loading}>
-                {loading && <span className="auth-btn-spinner" />}
-                {loading ? "Setting password…" : tokenType === "invite" ? "Activate Account" : "Set New Password"}
-              </button>
-            </form>
-          </>
-        )}
-
-        <button className="theme-btn" style={{ marginTop: 8, alignSelf: "center" }}
-          onClick={() => setDark(d => !d)} title={dark ? "Light mode" : "Dark mode"}>
-          {dark ? "☀" : "◑"}
-        </button>
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── DETAIL PANEL ─────────────────────────────────────────────────────────────
-function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, caps }) {
+function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, caps, flagMap }) {
   const [selTier,     setSelTier]     = useState("All");
   const [calcVar,     setCalcVar]     = useState(null);
   const [calcQty,     setCalcQty]     = useState("");
   const [filterColor, setFilterColor] = useState("All");
   const [filterSize,  setFilterSize]  = useState("All");
+  const [showFlags,   setShowFlags]   = useState(false);
+  const focusRef = useRef(null);
 
-  const variants = useMemo(() => getVariants(allData, product.parent_id), [allData, product.parent_id]);
-  const matrix   = useMemo(() => buildMatrix(allData, product.parent_id), [allData, product.parent_id]);
+  const variants = useMemo(()=>getVariants(allData,product.parent_id),[allData,product.parent_id]);
+  const matrix   = useMemo(()=>buildMatrix(allData,product.parent_id),[allData,product.parent_id]);
   const firstSku = variants[0]?.child_id;
-  const cvSku    = calcVar || firstSku;
+  const cvSku    = calcVar||firstSku;
 
-  // Detect if variants follow "Color / Size" pattern
-  const isSlashVariants = useMemo(() =>
-    variants.length > 1 && variants.every(v => v.variant_name.includes(" / ")),
+  const isSlashVariants = useMemo(()=>
+    variants.length>1&&variants.every(v=>v.variant_name.includes(" / ")),
   [variants]);
 
-  const colorOptions = useMemo(() => {
-    if (!isSlashVariants) return [];
-    return ["All", ...new Set(variants.map(v => v.variant_name.split(" / ")[0].trim()))];
-  }, [isSlashVariants, variants]);
+  const colorOptions = useMemo(()=>{
+    if(!isSlashVariants) return [];
+    const s = new Set(["All"]);
+    variants.forEach(v=>s.add(v.variant_name.split(" / ")[0]));
+    return [...s];
+  },[variants,isSlashVariants]);
 
-  const sizeOptions = useMemo(() => {
-    if (!isSlashVariants) return [];
-    return ["All", ...new Set(variants.map(v => v.variant_name.split(" / ")[1].trim()))];
-  }, [isSlashVariants, variants]);
+  const sizeOptions = useMemo(()=>{
+    if(!isSlashVariants) return [];
+    const s = new Set(["All"]);
+    variants.forEach(v=>{ const p=v.variant_name.split(" / "); if(p[1]) s.add(p[1]); });
+    return [...s];
+  },[variants,isSlashVariants]);
 
-  // When a focusChildSku is provided (from SKU search), pre-set the size filter
-  useEffect(() => {
-    if (!focusChildSku || !isSlashVariants) return;
-    const match = variants.find(v => v.child_sku === focusChildSku);
-    if (match) {
-      const [color, size] = match.variant_name.split(" / ").map(s => s.trim());
-      setFilterSize(size);
-      setFilterColor("All");
-    }
-  }, [focusChildSku, isSlashVariants, variants]);
-
-  const visibleVariants = useMemo(() => {
-    if (!isSlashVariants) return variants;
-    return variants.filter(v => {
-      const [color, size] = v.variant_name.split(" / ").map(s => s.trim());
-      return (filterColor === "All" || color === filterColor) &&
-             (filterSize  === "All" || size  === filterSize);
+  const visibleVariants = useMemo(()=>{
+    if(!isSlashVariants) return variants;
+    return variants.filter(v=>{
+      const [c,s]=v.variant_name.split(" / ");
+      return (filterColor==="All"||c===filterColor)&&(filterSize==="All"||s===filterSize);
     });
-  }, [variants, isSlashVariants, filterColor, filterSize]);
+  },[variants,isSlashVariants,filterColor,filterSize]);
 
-  // Auto-scroll ref for focused variant (from SKU search)
-  const focusRef = useCallback(node => {
-    if (node) node.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [focusChildSku]);
+  useEffect(()=>{
+    if(focusRef.current) focusRef.current.scrollIntoView({behavior:"smooth",block:"center"});
+  },[focusChildSku]);
 
-  // Qty calc — skips break=1 (duplicate sentinel), uses break=0 as floor
-  const calcTier = selTier === "All" ? "Wholesale" : selTier;
-  function resolveCalcPrice(qty) {
-    const prices = matrix[cvSku]?.[calcTier];
-    if (!prices) return null;
-    const applicable = Object.keys(prices).map(Number).filter(b => b !== 1 && b > 0 && qty >= b);
-    const qb = applicable.length ? Math.max(...applicable) : 0;
-    return prices[qb] ?? null;
-  }
-  const qNum           = parseInt(calcQty) || 0;
-  const uPrice         = qNum > 0 ? resolveCalcPrice(qNum) : null;
-  const uPriceRounded  = uPrice != null ? Math.round(uPrice * 100) / 100 : null;
-  const tPrice         = uPrice != null && qNum > 0 ? Math.round(uPrice * qNum * 100) / 100 : null;
+  // Qty calculator
+  const qNum = parseInt(calcQty,10);
+  const uPriceRaw = (cvSku&&qNum>0) ? (() => {
+    const breaks = Object.keys(matrix[cvSku]?.Wholesale||{}).map(Number)
+      .filter(b=>b!==1).filter(b=>b<=qNum).sort((a,b)=>b-a);
+    const qb = breaks.length?breaks[0]:0;
+    return matrix[cvSku]?.Wholesale?.[qb]??null;
+  })() : null;
+  const uPriceRounded = uPriceRaw!=null?Math.round(uPriceRaw*100)/100:null;
+  const tPrice = uPriceRounded!=null&&qNum>0?Math.round(uPriceRounded*qNum*100)/100:null;
 
-  const tiersToShow = selTier === "All" ? visibleTiers : (visibleTiers.includes(selTier) ? [selTier] : visibleTiers);
+  const tiersToShow = selTier==="All"?visibleTiers:(visibleTiers.includes(selTier)?[selTier]:visibleTiers);
 
-  // Dynamic qty breaks derived from real data, suppressing break=1
   function qtyBreaksAllTiers(childId) {
     const breaks = new Set();
-    tiersToShow.forEach(tier => {
-      Object.keys(matrix[childId]?.[tier] || {}).map(Number).filter(b => b !== 1).forEach(b => breaks.add(b));
+    tiersToShow.forEach(tier=>{
+      Object.keys(matrix[childId]?.[tier]||{}).map(Number).filter(b=>b!==1).forEach(b=>breaks.add(b));
     });
-    return [...breaks].sort((a,b) => a - b);
+    return [...breaks].sort((a,b)=>a-b);
   }
-
-  function qtyBreaksSingleTier(childId, tier) {
-    return Object.keys(matrix[childId]?.[tier] || {}).map(Number).filter(b => b !== 1).sort((a,b) => a - b);
+  function qtyBreaksSingleTier(childId,tier) {
+    return Object.keys(matrix[childId]?.[tier]||{}).map(Number).filter(b=>b!==1).sort((a,b)=>a-b);
   }
 
   function handleCSV() {
-    const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
+    const rows = allData.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier));
     downloadCSV(`${product.parent_sku}-prices.csv`,
       ["parent_sku","child_sku","variant_name","tier","qty_break","price","category","last_updated"],
-      rows.map(r => [r.parent_sku,r.child_sku,r.variant_name,r.tier,r.qty_break,r.price,r.category,r.last_updated])
+      rows.map(r=>[r.parent_sku,r.child_sku,r.variant_name,r.tier,r.qty_break,r.price,r.category,r.last_updated])
     );
   }
   function handleJSON() {
-    const rows = allData.filter(r => r.parent_id === product.parent_id && visibleTiers.includes(r.tier));
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(rows,null,2)],{type:"application/json"}));
-    a.download = `${product.parent_sku}-prices.json`; a.click();
+    const rows = allData.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier));
+    downloadJSON(`${product.parent_sku}-prices.json`, rows);
   }
+
+  const myFlags = flagMap?.[product.parent_id] || [];
+  const websiteUrl = product.slug ? `https://www.patioproducts.com/product/${product.slug}/` : null;
 
   return (
     <div className="detail fade">
-      {/* Header */}
       <div className="det-hdr">
         <img className="det-img" src={product.image_url} alt="" onError={e=>e.target.style.display="none"}/>
         <div className="det-info">
           <div className="det-cat">{product.category}</div>
           <div className="det-name">{product.parent_name}</div>
-          <div className="det-sku">SKU: {product.parent_sku}</div>
+          <div className="det-sku">
+            SKU: {product.parent_sku}
+            {websiteUrl && (
+              <a href={websiteUrl} target="_blank" rel="noreferrer"
+                style={{marginLeft:8,fontFamily:"var(--fm)",fontSize:9,color:"var(--brand)",textDecoration:"none",
+                  padding:"1px 6px",border:"1px solid rgba(72,147,103,.35)",borderRadius:3,
+                  background:"var(--brand-dim)",verticalAlign:"middle"}}
+                title="View on website">
+                ↗ website
+              </a>
+            )}
+          </div>
         </div>
         <button className="det-close" onClick={onClose}>×</button>
       </div>
 
-      {/* Actions */}
       <div className="det-acts">
         <button className="btn btn-a" onClick={()=>window.print()}>⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>}
+        {myFlags.length>0 && (
+          <button className={`btn btn-warn ${showFlags?"on":""}`} onClick={()=>setShowFlags(f=>!f)}>
+            ▲ {myFlags.length} flag{myFlags.length!==1?"s":""}
+          </button>
+        )}
         <span className="row-count">
           {allData.filter(r=>r.parent_id===product.parent_id&&visibleTiers.includes(r.tier)).length} rows
         </span>
       </div>
 
-      {/* Variant dimension filters — only for color/size products */}
+      {showFlags && myFlags.length>0 && (
+        <div className="flag-panel">
+          <div style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--err)",textTransform:"uppercase",letterSpacing:".1em"}}>
+            Data flags — {myFlags.length} issue{myFlags.length!==1?"s":""}
+          </div>
+          <div className="flag-list">
+            {myFlags.map((f,i)=><div key={i} className="flag-item">{f}</div>)}
+          </div>
+        </div>
+      )}
+
       {isSlashVariants && (
         <div className="det-acts" style={{background:"var(--s1)",gap:6}}>
           <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Filter</span>
@@ -1016,7 +856,6 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
         </div>
       )}
 
-      {/* Qty Calculator */}
       <div className="calc">
         <span className="calc-lbl">QTY CALC</span>
         <select className="calc-var" value={cvSku} onChange={e=>setCalcVar(e.target.value)}>
@@ -1024,18 +863,15 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
         </select>
         <span className="calc-lbl">×</span>
         <input className="calc-qty" type="number" min="1" placeholder="qty" value={calcQty} onChange={e=>setCalcQty(e.target.value)}/>
-        {tPrice != null ? (
+        {tPrice!=null ? (
           <>
             <span className="calc-arrow">→</span>
             <span className="calc-total">{fmt(tPrice)}</span>
             <span className="calc-unit">{fmt(uPriceRounded)} × {qNum}</span>
           </>
-        ) : calcQty ? (
-          <span className="calc-unit" style={{color:"var(--t3)"}}>enter qty</span>
-        ) : null}
+        ) : calcQty ? <span className="calc-unit" style={{color:"var(--t3)"}}>enter qty</span> : null}
       </div>
 
-      {/* Tier tabs */}
       <div className="ttabs">
         <button className={`ttab ${selTier==="All"?"on":""}`} onClick={()=>setSelTier("All")}>All Tiers</button>
         {visibleTiers.map(t=>(
@@ -1045,75 +881,65 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
         ))}
       </div>
 
-      {/* Matrix */}
       <div className="det-body">
-        {selTier !== "All" ? (
-          /* Single tier: variants × qty breaks */
-          visibleVariants.map(v => {
-            const breaks  = qtyBreaksSingleTier(v.child_id, selTier);
-            const isFocus = focusChildSku && v.child_sku === focusChildSku;
+        {selTier!=="All" ? (
+          visibleVariants.map(v=>{
+            const breaks  = qtyBreaksSingleTier(v.child_id,selTier);
+            const isFocus = focusChildSku&&v.child_sku===focusChildSku;
             return (
-              <div key={v.child_id} ref={isFocus ? focusRef : null} className="ptw"
+              <div key={v.child_id} ref={isFocus?focusRef:null} className="ptw"
                 style={{marginBottom:12,outline:isFocus?"2px solid var(--brand)":"none",borderRadius:7}}>
                 <table className="pt">
-                  <thead>
-                    <tr>
-                      <th>Variant / SKU</th>
-                      {breaks.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>
-                        <span className="vbadge" style={{marginRight:5}}>{v.variant_name}</span>
-                        <span className="skubadge">{v.child_sku}</span>
-                      </td>
-                      {breaks.map(q=>{
-                        const price   = matrix[v.child_id]?.[selTier]?.[q];
-                        const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
-                        const isWs    = selTier === "Wholesale";
-                        const isBase  = q === 0;
-                        const priceClass = isWs ? "pc-ws" :
-                          pctVsWholesale(price, wsPrice) > 0 ? "pc-above" : "pc-below";
-                        return (
-                          <td key={q} className="r">
-                            {price != null ? (
-                              <>
-                                <span className={isBase ? priceClass : "pc-qty"}>{fmt(price)}</span>
-                                {isBase && <PctBadge price={price} wsPrice={wsPrice}/>}
-                              </>
-                            ) : "—"}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  </tbody>
+                  <thead><tr>
+                    <th>Variant / SKU</th>
+                    {breaks.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
+                  </tr></thead>
+                  <tbody><tr>
+                    <td>
+                      <span className="vbadge" style={{marginRight:5}}>{v.variant_name}</span>
+                      <span className="skubadge">{v.child_sku}</span>
+                    </td>
+                    {breaks.map(q=>{
+                      const price   = matrix[v.child_id]?.[selTier]?.[q];
+                      const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
+                      const isWs    = selTier==="Wholesale";
+                      const isBase  = q===0;
+                      const priceClass = isWs?"pc-ws":pctVsWholesale(price,wsPrice)>0?"pc-above":"pc-below";
+                      return (
+                        <td key={q} className="r">
+                          {price!=null ? (
+                            <>
+                              <span className={isBase?priceClass:"pc-qty"}>{fmt(price)}</span>
+                              {isBase&&<PctBadge price={price} wsPrice={wsPrice}/>}
+                            </>
+                          ) : "—"}
+                        </td>
+                      );
+                    })}
+                  </tr></tbody>
                 </table>
               </div>
             );
           })
         ) : (
-          /* All tiers: one section per variant, dynamic breaks */
-          visibleVariants.map(v => {
+          visibleVariants.map(v=>{
             const breaks  = qtyBreaksAllTiers(v.child_id);
-            const isFocus = focusChildSku && v.child_sku === focusChildSku;
+            const isFocus = focusChildSku&&v.child_sku===focusChildSku;
             return (
-              <div key={v.child_id} ref={isFocus ? focusRef : null} className="msec"
+              <div key={v.child_id} ref={isFocus?focusRef:null} className="msec"
                 style={{outline:isFocus?"2px solid var(--brand)":"none",borderRadius:7,padding:isFocus?4:0}}>
                 <div className="msec-hdr">
                   {v.variant_name} <span className="vbadge">{v.child_sku}</span>
                 </div>
                 <div className="ptw">
                   <table className="pt">
-                    <thead>
-                      <tr>
-                        <th>Tier</th>
-                        {breaks.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
-                      </tr>
-                    </thead>
+                    <thead><tr>
+                      <th>Tier</th>
+                      {breaks.map(q=><th key={q} className="r">{q===0?"Regular":`${q}+`}</th>)}
+                    </tr></thead>
                     <tbody>
                       {tiersToShow.map(tier=>{
-                        const isWs = tier === "Wholesale";
+                        const isWs = tier==="Wholesale";
                         return (
                           <tr key={tier}>
                             <td>
@@ -1127,10 +953,10 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
                               const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
                               return (
                                 <td key={q} className="r">
-                                  {price != null ? (
+                                  {price!=null ? (
                                     <>
                                       <span style={{color:q===0?(isWs?"var(--ws)":TIER_COLORS[tier]):"var(--text)"}}>{fmt(price)}</span>
-                                      {q===0 && !isWs && <PctBadge price={price} wsPrice={wsPrice}/>}
+                                      {q===0&&!isWs&&<PctBadge price={price} wsPrice={wsPrice}/>}
                                     </>
                                   ) : "—"}
                                 </td>
@@ -1152,91 +978,177 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
 }
 
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
-function SheetView({ category, visibleTiers, allData, caps }) {
-  const [tier,   setTier]   = useState(visibleTiers[0] || "Wholesale");
-  const [search, setSearch] = useState("");
-  const activeTier = visibleTiers.includes(tier) ? tier : visibleTiers[0];
+function SheetView({ visibleTiers, allData, caps }) {
+  const [tier,     setTier]     = useState(visibleTiers[0]||"Wholesale");
+  const [search,   setSearch]   = useState("");
+  const [excluded, setExcluded] = useState(()=>new Set(DEFAULT_EXCLUDED_CATEGORIES));
+  const activeTier = visibleTiers.includes(tier)?tier:visibleTiers[0];
 
-  const data = useMemo(()=>getTierFlat(allData, activeTier), [allData, activeTier]);
+  const allCategories = useMemo(()=>{
+    const s = new Set();
+    allData.forEach(r=>{ if(r.category) s.add(decodeEntities(r.category)); });
+    return [...s].sort();
+  },[allData]);
 
-  // Search is global — ignore category filter when searching
-  const effectiveCat = search ? "All" : category;
+  const data = useMemo(()=>getTierFlat(allData,activeTier),[allData,activeTier]);
+  const color = TIER_COLORS[activeTier];
+  const today = new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
 
   const rows = useMemo(()=>{
     let entries = Object.entries(data);
-    if (effectiveCat !== "All") entries = entries.filter(([,v])=>v.category===effectiveCat);
-    if (search) { const q=search.toLowerCase(); entries=entries.filter(([sku,v])=>v.parent_name.toLowerCase().includes(q)||sku.toLowerCase().includes(q)||v.parent_sku.toLowerCase().includes(q)); }
+    // Exclude hidden categories (unless searching)
+    if (!search) entries = entries.filter(([,v])=>!excluded.has(v.category));
+    if (search) {
+      const q=search.toLowerCase();
+      entries=entries.filter(([sku,v])=>
+        v.parent_name.toLowerCase().includes(q)||sku.toLowerCase().includes(q)||v.parent_sku.toLowerCase().includes(q)
+      );
+    }
     return entries.sort((a,b)=>{
       if(a[1].category!==b[1].category) return a[1].category.localeCompare(b[1].category);
       return a[1].parent_name.localeCompare(b[1].parent_name);
     });
-  },[data, effectiveCat, search]);
+  },[data,excluded,search]);
 
-  const color = TIER_COLORS[activeTier];
-  let lastCat = null;
-
-  // Derive qty break columns from the FILTERED rows only, suppress break=1
-  const sheetBreaks = useMemo(() => {
-    const breaks = new Set();
-    rows.forEach(([,v]) => {
-      Object.keys(v).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
-        if (v[b] != null) breaks.add(b);
+  // Per-category qty breaks (only breaks present in that category's rows)
+  const catBreaksMap = useMemo(()=>{
+    const m = {};
+    rows.forEach(([,v])=>{
+      const cat = v.category;
+      if (!m[cat]) m[cat] = new Set();
+      Object.keys(v).filter(k=>!isNaN(k)).map(Number).filter(b=>b!==1).forEach(b=>{
+        if(v[b]!=null) m[cat].add(b);
       });
     });
-    return [...breaks].sort((a,b) => a - b);
-  }, [rows]);
+    Object.keys(m).forEach(cat=>{ m[cat]=[...m[cat]].sort((a,b)=>a-b); });
+    return m;
+  },[rows]);
+
+  // Global breaks (for CSV export header)
+  const allBreaks = useMemo(()=>{
+    const s = new Set();
+    rows.forEach(([,v])=>Object.keys(v).filter(k=>!isNaN(k)).map(Number).filter(b=>b!==1).forEach(b=>{ if(v[b]!=null) s.add(b); }));
+    return [...s].sort((a,b)=>a-b);
+  },[rows]);
+
+  function handleCSV() {
+    downloadCSV(
+      `${activeTier}-prices.csv`,
+      ["child_sku","parent_sku","parent_name","variant_name","category",...allBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
+      rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...allBreaks.map(q=>v[q]??"")])
+    );
+  }
+
+  function handleJSON() {
+    const payload = rows.map(([sku,v])=>({
+      child_sku:sku, parent_sku:v.parent_sku, parent_name:v.parent_name,
+      variant_name:v.variant_name, category:v.category, tier:activeTier,
+      prices:Object.fromEntries(allBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
+    }));
+    downloadJSON(`${activeTier}-prices.json`, payload);
+  }
+
+  function handleXLSX() {
+    // Build XLSX with one sheet per category using SheetJS
+    // Dynamically load SheetJS if not present
+    if (!window.XLSX) {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      s.onload = () => buildXLSX();
+      document.head.appendChild(s);
+    } else {
+      buildXLSX();
+    }
+
+    function buildXLSX() {
+      const wb = window.XLSX.utils.book_new();
+      wb.Props = { Title:"PriceMatrix Export", Author:"Patio Products, Inc." };
+
+      // Group rows by category
+      const byCat = {};
+      rows.forEach(([sku,v])=>{
+        (byCat[v.category]??=[]).push([sku,v]);
+      });
+
+      Object.entries(byCat).forEach(([cat, catRows])=>{
+        const catBreaks = catBreaksMap[cat]||allBreaks;
+        const headers = ["SKU","Parent SKU","Product","Variant","Category",...catBreaks.map(q=>q===0?"Regular Price":`Qty ${q}+`)];
+        const dataRows = catRows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...catBreaks.map(q=>v[q]??null)]);
+        // Sheet name max 31 chars, strip invalid chars
+        const sheetName = cat.replace(/[:\\/?*[\]]/g,"").slice(0,31);
+        const ws = window.XLSX.utils.aoa_to_sheet([
+          [`CONFIDENTIAL — Property of Patio Products, Inc. Not for distribution.`],
+          [`${activeTier} Pricing — ${cat} — ${today}`],
+          [],
+          headers,
+          ...dataRows,
+        ]);
+        // Style the watermark row (row 0) — note: SheetJS community doesn't support styles, but we set column widths
+        ws["!cols"] = [
+          {wch:16},{wch:14},{wch:36},{wch:20},{wch:18},
+          ...catBreaks.map(()=>({wch:12}))
+        ];
+        window.XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      });
+
+      // Summary sheet
+      const summaryData = [
+        ["CONFIDENTIAL — Property of Patio Products, Inc."],
+        [`Export: ${activeTier} pricing`],
+        [`Generated: ${today}`],
+        [`Categories included: ${Object.keys(byCat).join(", ")}`],
+        [],
+        ["For pricing questions contact Patio Products, Inc."],
+      ];
+      const summaryWs = window.XLSX.utils.aoa_to_sheet(summaryData);
+      window.XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
+
+      window.XLSX.writeFile(wb, `${activeTier}-prices.xlsx`);
+    }
+  }
+
+  let lastCat = null;
 
   return (
     <div className="sheet">
+      {/* Print header */}
+      <div className="print-hdr">
+        <h1>Price List — {activeTier}</h1>
+        <p>Patio Products, Inc. · Prepared {today} · Prices subject to change without notice</p>
+      </div>
+      <div className="print-watermark">
+        CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
+      </div>
+
       <div className="sheet-bar">
         <div className="tier-pills">
           {visibleTiers.map(t=>(
             <button key={t} className="tier-pill"
-              style={activeTier===t ? {borderColor:TIER_COLORS[t],color:TIER_COLORS[t],background:`${TIER_COLORS[t]}18`} : {}}
+              style={activeTier===t?{borderColor:TIER_COLORS[t],color:TIER_COLORS[t],background:`${TIER_COLORS[t]}18`}:{}}
               onClick={()=>setTier(t)}>{t}</button>
           ))}
         </div>
-        <input className="inp" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
+
+        <CategoryMultiSelect categories={allCategories} excluded={excluded} onChange={setExcluded}/>
+
+        <input className="inp" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
 
-        {/* Crosstab CSV */}
-        {caps.canExportCSV && <button className="btn" onClick={()=>downloadCSV(
-          `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
-          ["child_sku","parent_sku","parent_name","variant_name","category",...sheetBreaks.map(q=>q===0?"regular_price":`qty_${q}_plus`)],
-          rows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...sheetBreaks.map(q=>v[q]??"")])
-        )}>↓ CSV</button>}
+        <button className="btn" onClick={()=>window.print()} title="Print or save as PDF">⊞ Print / PDF</button>
 
-        {/* JSON — normalized, machine readable */}
-        {caps.canExportJSON && <button className="btn" onClick={()=>{
-          const payload = rows.map(([sku,v])=>({
-            child_sku:sku, parent_sku:v.parent_sku, parent_name:v.parent_name,
-            variant_name:v.variant_name, category:v.category, tier:activeTier,
-            prices:Object.fromEntries(sheetBreaks.filter(q=>v[q]!=null).map(q=>[q,v[q]])),
-          }));
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
-          a.download = `${activeTier}-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.json`;
-          a.click();
-        }}>↓ JSON</button>}
+        {caps.canExportCSV && <button className="btn btn-o" onClick={handleCSV} title="Export as CSV (single sheet, all categories)">↓ CSV</button>}
+        {caps.canExportCSV && <button className="btn btn-o" onClick={handleXLSX} title="Export as Excel (one tab per category)">↓ XLSX</button>}
+        {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON} title="Export as JSON">↓ JSON</button>}
 
-        {/* Sage 50 — admin only, IN PROGRESS */}
         {caps.canExportSage && (
           <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)",opacity:0.6,cursor:"not-allowed",display:"flex",alignItems:"center",gap:5}}
-            onClick={()=>{
-              const sageRows = buildSageExport(allData);
-              const filtered = effectiveCat!=="All" ? sageRows.filter(r=>r.category===effectiveCat) : sageRows;
-              downloadCSV(
-                `sage-prices${effectiveCat!=="All"?"-"+effectiveCat:""}.csv`,
-                ["Item ID","Price Level 1","Price Level 2","Price Level 3","Price Level 4","Price Level 5","Price Level 6","Price Level 7","Price Level 8","Price Level 9","Price Level 10"],
-                filtered.map(r=>[r.item_id,r.price_level_1,r.price_level_2,r.price_level_3,r.price_level_4,r.price_level_5,r.price_level_6,r.price_level_7,r.price_level_8,r.price_level_9,r.price_level_10])
-              );
-            }}
             title="Sage 50 price file export — item ID mapping in progress">
-            ↓ Export Sage 50 Price File
-            <span className="badge-wip">IN PROGRESS</span>
+            ↓ Sage 50 <span className="badge-wip">IN PROGRESS</span>
           </button>
         )}
       </div>
+
+      <WatermarkBar/>
 
       <div className="sheet-wrap">
         <table className="st">
@@ -1244,7 +1156,8 @@ function SheetView({ category, visibleTiers, allData, caps }) {
             <tr>
               <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
-              {sheetBreaks.map(q=>(
+              {/* We render per-category breaks — for the header row we show a placeholder; actual data uses cat-level breaks */}
+              {allBreaks.map(q=>(
                 <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
                   {q===0?"Price":`${q}+`}
                 </th>
@@ -1253,27 +1166,29 @@ function SheetView({ category, visibleTiers, allData, caps }) {
           </thead>
           <tbody>
             {rows.map(([sku,v])=>{
-              const showCat = v.category !== lastCat;
+              const showCat = v.category!==lastCat;
               lastCat = v.category;
+              const catBreaks = catBreaksMap[v.category]||allBreaks;
               return [
                 showCat && (
                   <tr key={`ch-${v.category}`} className="cat-hdr">
-                    <td colSpan={2+sheetBreaks.length} style={{position:"sticky",left:0}}>{v.category}</td>
+                    <td colSpan={2+allBreaks.length} style={{position:"sticky",left:0}}>{v.category}</td>
                   </tr>
                 ),
                 <tr key={sku}>
                   <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
                     <div className="s-name">{v.parent_name}</div>
-                    {v.variant_name!=="Simple" && <div className="s-var">{v.variant_name}</div>}
+                    {v.variant_name!=="Simple"&&<div className="s-var">{v.variant_name}</div>}
                   </td>
                   <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
-                  {sheetBreaks.map(q=>{
+                  {allBreaks.map(q=>{
                     const p = v[q];
+                    const inCat = catBreaks.includes(q);
                     return (
                       <td key={q} className="r">
-                        {p != null
+                        {p!=null
                           ? <span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
-                          : <span style={{color:"var(--t4)"}}>—</span>}
+                          : <span style={{color:inCat?"var(--t4)":"var(--s1)"}}>—</span>}
                       </td>
                     );
                   })}
@@ -1292,178 +1207,148 @@ function CustomerView({ allData, caps }) {
   const [custId,        setCustId]        = useState(MOCK_CUSTOMERS[0].id);
   const [search,        setSearch]        = useState("");
   const [category,      setCategory]      = useState("All");
-  const [specialFilter, setSpecialFilter] = useState("all"); // "all" | "special" | "standard"
+  const [specialFilter, setSpecialFilter] = useState("all");
   const cust = MOCK_CUSTOMERS.find(c=>c.id===custId);
 
-  // Derive qty breaks from real data for this customer's tier, suppress break=1
   const custBreaks = useMemo(()=>{
     const breaks = new Set([0]);
-    allData.filter(r => r.tier === cust.tier && r.qty_break !== 1).forEach(r => breaks.add(r.qty_break));
+    allData.filter(r=>r.tier===cust.tier&&r.qty_break!==1).forEach(r=>breaks.add(r.qty_break));
     return [...breaks].sort((a,b)=>a-b);
-  },[allData, cust]);
+  },[allData,cust]);
 
-  // All categories from real data
   const categories = useMemo(()=>{
     const s = new Set();
-    allData.forEach(r => { if(r.category) s.add(decodeEntities(r.category)); });
+    allData.forEach(r=>{ if(r.category) s.add(decodeEntities(r.category)); });
     return [...s].sort();
   },[allData]);
 
   const rows = useMemo(()=>{
-    const allVariants = [];
-    MOCK_CUSTOMERS.forEach(c => {
-      if (c.id !== custId) return;
-    });
-    // Build rows from real data products
-    const parentMap = new Map();
-    allData.forEach(r => {
-      if (!parentMap.has(r.parent_id)) parentMap.set(r.parent_id, {
-        parent_sku: r.parent_sku, parent_name: decodeEntities(r.parent_name), category: decodeEntities(r.category),
-      });
-    });
     const variantMap = new Map();
-    allData.forEach(r => {
-      if (!variantMap.has(r.child_sku)) variantMap.set(r.child_sku, {
-        child_sku: r.child_sku, parent_sku: r.parent_sku,
-        parent_name: decodeEntities(r.parent_name), variant_name: decodeEntities(r.variant_name),
-        category: decodeEntities(r.category),
+    allData.forEach(r=>{
+      if(!variantMap.has(r.child_sku)) variantMap.set(r.child_sku,{
+        child_sku:r.child_sku, parent_sku:r.parent_sku,
+        parent_name:decodeEntities(r.parent_name), variant_name:decodeEntities(r.variant_name),
+        category:decodeEntities(r.category),
       });
     });
-
-    variantMap.forEach((v, childSku) => {
-      const prices = {};
-      custBreaks.forEach(qty => {
-        const { price, isSpecial } = resolveCustomerPrice(allData, cust, childSku, qty);
-        prices[qty] = { price, isSpecial };
+    const allVariants = [];
+    variantMap.forEach((v,childSku)=>{
+      const prices={};
+      custBreaks.forEach(qty=>{
+        const {price,isSpecial}=resolveCustomerPrice(allData,cust,childSku,qty);
+        prices[qty]={price,isSpecial};
       });
-      allVariants.push({
-        ...v,
-        hasSpecial: !!cust.special[childSku],
-        prices,
-      });
+      allVariants.push({...v,hasSpecial:!!cust.special[childSku],prices});
     });
-
     return allVariants.sort((a,b)=>{
-      if(a.hasSpecial !== b.hasSpecial) return b.hasSpecial ? 1 : -1;
-      if(a.category !== b.category) return a.category.localeCompare(b.category);
+      if(a.hasSpecial!==b.hasSpecial) return b.hasSpecial?1:-1;
+      if(a.category!==b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[cust, allData, custBreaks, custId]);
+  },[cust,allData,custBreaks]);
 
-  const effectiveCat = search ? "All" : category;
-
+  const effectiveCat = search?"All":category;
   const filtered = useMemo(()=>{
-    let list = rows;
-    if(effectiveCat !== "All") list = list.filter(r=>r.category===effectiveCat);
-    if(specialFilter === "special")  list = list.filter(r=>r.hasSpecial);
-    if(specialFilter === "standard") list = list.filter(r=>!r.hasSpecial);
-    if(search){ const q=search.toLowerCase(); list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q)); }
+    let list=rows;
+    if(effectiveCat!=="All") list=list.filter(r=>r.category===effectiveCat);
+    if(specialFilter==="special")  list=list.filter(r=>r.hasSpecial);
+    if(specialFilter==="standard") list=list.filter(r=>!r.hasSpecial);
+    if(search){const q=search.toLowerCase();list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q));}
     return list;
-  },[rows, effectiveCat, specialFilter, search]);
+  },[rows,effectiveCat,specialFilter,search]);
 
-  let lastCat = null;
-  const today = new Date().toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
+  let lastCat=null;
+  const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
+  const tierColor=TIER_COLORS[cust.tier]||"var(--brand)";
 
   function handleCSV() {
-    downloadCSV(
-      `${cust.name.replace(/\s+/g,"-")}-prices.csv`,
+    downloadCSV(`${cust.name.replace(/\s+/g,"-")}-prices.csv`,
       ["sku","product","variant","category",...custBreaks.map(q=>q===0?"price":`qty_${q}_plus`)],
       filtered.map(r=>[r.child_sku,r.parent_name,r.variant_name,r.category,...custBreaks.map(q=>r.prices[q]?.price??"")])
     );
   }
-
   function handleJSON() {
-    const payload = filtered.map(r=>({
-      child_sku:r.child_sku, parent_sku:r.parent_sku,
-      parent_name:r.parent_name, variant_name:r.variant_name,
-      category:r.category, tier:cust.tier,
+    const payload=filtered.map(r=>({
+      child_sku:r.child_sku,parent_sku:r.parent_sku,parent_name:r.parent_name,
+      variant_name:r.variant_name,category:r.category,tier:cust.tier,
       prices:Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
     }));
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
-    a.download = `${cust.name.replace(/\s+/g,"-")}-prices.json`;
-    a.click();
+    downloadJSON(`${cust.name.replace(/\s+/g,"-")}-prices.json`, payload);
   }
-
-  const tierColor = TIER_COLORS[cust.tier] || "var(--brand)";
 
   return (
     <div className="custv">
-      {/* Print-only header */}
       <div className="print-cust-hdr">
         <h1>Price List — {cust.name}</h1>
         <p>Prepared {today} · Prices valid as of this date · Subject to change without notice</p>
       </div>
-
-      {/* Demo data banner */}
-      <div className="no-print" style={{padding:"7px 14px",background:"var(--gold-bg)",borderBottom:"1px solid var(--b1)",display:"flex",alignItems:"center",gap:8,fontFamily:"var(--fm)",fontSize:10,color:"var(--gold)"}}>
-        ⚠ Demo data — customer-specific pricing not yet connected. This view shows the feature structure only.
+      <div className="print-watermark" style={{display:"none"}}>
+        CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
       </div>
-
+      <div className="no-print" style={{padding:"7px 14px",background:"var(--gold-bg)",borderBottom:"1px solid var(--b1)",display:"flex",alignItems:"center",gap:8,fontFamily:"var(--fm)",fontSize:10,color:"var(--gold)"}}>
+        ⚠ Demo data — customer-specific pricing not yet connected.
+      </div>
       <div className="cust-bar">
         <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Customer</span>
-        <select className="cust-sel" value={custId} onChange={e=>{ setCustId(e.target.value); setSearch(""); setCategory("All"); setSpecialFilter("all"); }}>
+        <select className="cust-sel" value={custId} onChange={e=>{setCustId(e.target.value);setSearch("");setCategory("All");setSpecialFilter("all");}}>
           {MOCK_CUSTOMERS.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-
         <span className="no-print" style={{padding:"3px 10px",borderRadius:20,fontSize:10,fontFamily:"var(--fm)",background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}40`,whiteSpace:"nowrap"}}>
           {cust.tier}
         </span>
-
         <div className="divider no-print"/>
-
         <select className="cust-sel no-print" value={category} onChange={e=>setCategory(e.target.value)}>
           <option value="All">All Categories</option>
           {categories.map(c=><option key={c} value={c}>{c}</option>)}
         </select>
-
         <select className="cust-sel no-print" value={specialFilter} onChange={e=>setSpecialFilter(e.target.value)}>
           <option value="all">All Pricing</option>
           <option value="special">Special Only</option>
           <option value="standard">Standard Only</option>
         </select>
-
-        <input className="inp no-print" style={{width:180}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
+        <input className="inp no-print" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} variants</span>
         <button className="btn btn-a no-print" onClick={()=>window.print()}>⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportJSON && <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>}
       </div>
-
+      <WatermarkBar/>
       <div className="cust-wrap">
         <table className="ct" style={{width:"auto"}}>
           <thead>
             <tr>
-              <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
-              <th style={{position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)",minWidth:90}}>SKU</th>
-              {custBreaks.map(q=><th key={q} className="r" style={{width:"1px",whiteSpace:"nowrap",color:q===0?"var(--brand)":undefined}}>{q===0?"Price":`${q}+`}</th>)}
+              <th style={{minWidth:200,maxWidth:280,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
+              <th style={{position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)",minWidth:100}}>SKU</th>
+              {custBreaks.map(q=>(
+                <th key={q} className="r" style={{color:q===0?tierColor:undefined,width:"1px",whiteSpace:"nowrap"}}>
+                  {q===0?"Price":`${q}+`}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {filtered.map(row=>{
-              const showCat = row.category !== lastCat;
-              lastCat = row.category;
-              const rowBg = row.hasSpecial ? "rgba(255,95,132,.05)" : undefined;
+            {filtered.map(r=>{
+              const showCat=r.category!==lastCat;
+              lastCat=r.category;
               return [
-                showCat && (
-                  <tr key={`ch-${row.category}`} className="cat-hdr">
-                    <td colSpan={2+custBreaks.length} style={{position:"sticky",left:0}}>{row.category}</td>
+                showCat&&(
+                  <tr key={`ch-${r.category}`} className="cat-hdr">
+                    <td colSpan={2+custBreaks.length} style={{position:"sticky",left:0}}>{r.category}</td>
                   </tr>
                 ),
-                <tr key={row.child_sku} style={{background:rowBg}}>
-                  <td style={{minWidth:200,maxWidth:260,whiteSpace:"normal",position:"sticky",left:0,zIndex:1,background:row.hasSpecial?"rgba(255,95,132,.05)":"var(--s1)"}}>
-                    <span style={{display:"flex",alignItems:"center",gap:5}}>
-                      <span style={{fontFamily:"var(--fd)",fontWeight:600,fontSize:11}}>{row.parent_name}</span>
-                      {row.hasSpecial && <span className="spec-flag no-print">★ special</span>}
-                    </span>
-                    {row.variant_name!=="Simple" && <div style={{fontSize:10,color:"var(--t2)",marginTop:1}}>{row.variant_name}</div>}
+                <tr key={r.child_sku}>
+                  <td style={{minWidth:200,maxWidth:280,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
+                    <div className="s-name">{r.parent_name}{r.hasSpecial&&<span className="spec-flag">SPECIAL</span>}</div>
+                    {r.variant_name!=="Simple"&&<div className="s-var">{r.variant_name}</div>}
                   </td>
-                  <td style={{position:"sticky",left:200,zIndex:1,background:row.hasSpecial?"rgba(255,95,132,.05)":"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{row.child_sku}</span></td>
+                  <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{r.child_sku}</span></td>
                   {custBreaks.map(q=>{
-                    const {price, isSpecial} = row.prices[q] || {};
+                    const pd=r.prices[q];
+                    const price=pd?.price;
+                    const isSpecial=pd?.isSpecial;
                     return (
-                      <td key={q} className="r" style={{whiteSpace:"nowrap"}}>
-                        {price != null
+                      <td key={q} className="r">
+                        {price!=null
                           ? <span style={{color:q===0?(isSpecial?"var(--coral)":"var(--brand)"):isSpecial?"var(--coral)":"var(--text)"}}>{fmt(price)}</span>
                           : <span className="c-price-nil">—</span>}
                       </td>
@@ -1479,131 +1364,126 @@ function CustomerView({ allData, caps }) {
   );
 }
 
-// ─── CREATE USER MODAL ────────────────────────────────────────────────────────
-// Admin-only modal to create new users via POST /admin/users (bypasses broken
-// invite/verify flow). Creates the user with a temp password; admin notifies
-// them manually and they use Forgot Password to set their own.
-function CreateUserModal({ user, onClose }) {
-  const [email,       setEmail]       = useState("");
-  const [role,        setRole]        = useState("viewer");
-  const [tempPw,      setTempPw]      = useState("");
-  const [loading,     setLoading]     = useState(false);
-  const [error,       setError]       = useState("");
-  const [result,      setResult]      = useState(null); // success result
+// ─── FLAGS VIEW ───────────────────────────────────────────────────────────────
+function FlagsView({ allData, onSelectProduct }) {
+  const [loading,     setLoading]     = useState(true);
+  const [flagResults, setFlagResults] = useState([]);
+  const [filterType,  setFilterType]  = useState("all");
+  const [search,      setSearch]      = useState("");
 
-  async function handleCreate(e) {
-    e.preventDefault();
-    if (!email || !tempPw) { setError("Email and temporary password are required."); return; }
-    if (tempPw.length < 8) { setError("Temporary password must be at least 8 characters."); return; }
-    setLoading(true); setError("");
-    try {
-      const res = await fetch("/.netlify/functions/create-user", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${user.accessToken}`,
-        },
-        body: JSON.stringify({ email: email.trim().toLowerCase(), role, tempPassword: tempPw }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "Failed to create user.");
-      } else {
-        setResult(data);
-      }
-    } catch {
-      setError("Network error — please try again.");
+  useEffect(()=>{
+    if (!allData.length) return;
+    setLoading(true);
+    // Run in a timeout so UI can render the spinner first
+    const t = setTimeout(()=>{
+      const results = computeRedFlags(allData);
+      setFlagResults(results);
+      setLoading(false);
+    }, 50);
+    return ()=>clearTimeout(t);
+  },[allData]);
+
+  const FLAG_TYPES = [
+    { id:"all",          label:"All flags" },
+    { id:"price_zero",   label:"Missing price" },
+    { id:"tier_order",   label:"Tier order" },
+    { id:"qty_ladder",   label:"Qty ladder" },
+    { id:"sentinel",     label:"Sentinel mismatch" },
+    { id:"outlier",      label:"Price outlier" },
+    { id:"image",        label:"Image" },
+    { id:"category",     label:"Category" },
+    { id:"variant",      label:"Variants" },
+    { id:"sku_dupe",     label:"Dup SKU" },
+  ];
+
+  const filterMap = {
+    price_zero: f => f.includes("Missing or zero"),
+    tier_order: f => f.includes("tier order violated") || f.includes("tier violated"),
+    qty_ladder: f => f.includes("price increases at qty"),
+    sentinel:   f => f.includes("sentinel"),
+    outlier:    f => f.includes("Possible price typo"),
+    image:      f => f.includes("image"),
+    category:   f => f.includes("Uncategorized"),
+    variant:    f => f.includes("variant"),
+    sku_dupe:   f => f.includes("child SKU"),
+  };
+
+  const filtered = useMemo(()=>{
+    let list = flagResults;
+    if (filterType!=="all") {
+      const fn = filterMap[filterType];
+      list = list.filter(r => fn && r.flags.some(fn));
     }
-    setLoading(false);
-  }
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(r =>
+        r.parent_name?.toLowerCase().includes(q) ||
+        r.parent_sku?.toLowerCase().includes(q) ||
+        r.flags.some(f=>f.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  },[flagResults,filterType,search]);
 
-  const overlayStyle = {
-    position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:9999,
-    display:"flex",alignItems:"center",justifyContent:"center",
-  };
-  const cardStyle = {
-    background:"var(--s1)",borderRadius:12,padding:"32px 28px",width:400,maxWidth:"95vw",
-    boxShadow:"0 8px 40px rgba(0,0,0,0.25)",fontFamily:"var(--fb)",
-  };
-  const labelStyle = { display:"block",fontSize:12,color:"var(--t3)",marginBottom:5,marginTop:14,fontWeight:500 };
-  const inputStyle = { width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid var(--b2)",
-    background:"var(--bg)",color:"var(--t1)",fontSize:13,fontFamily:"var(--fb)" };
-  const btnStyle = { marginTop:20,width:"100%",padding:"10px",borderRadius:7,border:"none",
-    background:"var(--brand)",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer" };
+  if (loading) return (
+    <div className="loading-wrap">
+      <div className="spinner"/>
+      <div style={{fontFamily:"var(--fm)",fontSize:11,color:"var(--t3)"}}>Analyzing {allData.length.toLocaleString()} rows…</div>
+    </div>
+  );
+
+  const totalFlaggedProducts = flagResults.length;
+  const totalFlags = flagResults.reduce((s,r)=>s+r.flags.length,0);
 
   return (
-    <div style={overlayStyle} onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
-      <div style={cardStyle}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-          <div style={{fontFamily:"var(--fd)",fontSize:16,fontWeight:700,color:"var(--t1)"}}>Add User</div>
-          <button onClick={onClose} style={{background:"none",border:"none",fontSize:18,cursor:"pointer",color:"var(--t3)"}}>✕</button>
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      {/* Toolbar */}
+      <div className="sheet-bar">
+        <div style={{fontFamily:"var(--fd)",fontWeight:700,fontSize:13,color:"var(--err)"}}>
+          ▲ Data Flags
         </div>
+        <div style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)"}}>
+          <span style={{color:"var(--err)",fontWeight:700}}>{totalFlaggedProducts}</span> products · <span style={{color:"var(--err)",fontWeight:700}}>{totalFlags}</span> issues
+        </div>
+        <div className="divider"/>
+        <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
+          {FLAG_TYPES.map(ft=>(
+            <button key={ft.id} className="tier-pill"
+              style={filterType===ft.id?{borderColor:"var(--err)",color:"var(--err)",background:"var(--err-bg)"}:{}}
+              onClick={()=>setFilterType(ft.id)}>{ft.label}</button>
+          ))}
+        </div>
+        <input className="inp" style={{width:160,marginLeft:"auto"}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
+        <span className="sheet-cnt"><span>{filtered.length}</span> products</span>
+      </div>
 
-        {result ? (
-          // ── SUCCESS STATE ──
-          <div>
-            <div style={{background:"#e8f5ee",border:"1px solid #a8d5be",borderRadius:8,padding:"14px 16px",marginBottom:16}}>
-              <div style={{color:"#2a6645",fontWeight:600,fontSize:13,marginBottom:6}}>✓ User created successfully</div>
-              <div style={{fontSize:12,color:"#2a6645",lineHeight:1.6}}>
-                <strong>Email:</strong> {result.email}<br/>
-                <strong>Role:</strong> {result.role}<br/>
-                <strong>Password persisted:</strong> {result.passwordPersisted ? "✓ Yes" : "⚠ No — see note below"}
-              </div>
-            </div>
-            {!result.passwordPersisted && (
-              <div style={{background:"#fff8e1",border:"1px solid #ffe082",borderRadius:8,padding:"12px 14px",marginBottom:14,fontSize:12,color:"#7a5c00",lineHeight:1.6}}>
-                ⚠ <strong>Password not confirmed by GoTrue</strong> — this is a known Netlify Identity platform issue.
-                Try logging in with the credentials anyway; some instances accept the password despite not returning <code>encrypted_password</code>.
-                If login fails, the Supabase migration is the next step.
-              </div>
-            )}
-            <div style={{background:"var(--s2)",borderRadius:8,padding:"12px 14px",fontSize:12,color:"var(--t2)",lineHeight:1.7}}>
-              <strong>Next steps:</strong><br/>
-              1. Message {result.email} their temp password<br/>
-              2. Ask them to sign in, then immediately use <em>Forgot Password</em> to set their own<br/>
-              3. Assign role in Netlify Identity dashboard if needed (role was set to <strong>{result.role}</strong>)
-            </div>
-            <button style={{...btnStyle, marginTop:16}} onClick={()=>{ setResult(null); setEmail(""); setTempPw(""); }}>
-              Add Another User
-            </button>
-          </div>
-        ) : (
-          // ── FORM STATE ──
-          <form onSubmit={handleCreate}>
-            <div style={{fontSize:12,color:"var(--t3)",marginBottom:4,lineHeight:1.5}}>
-              Creates the account with a temporary password. The user logs in, then uses <em>Forgot Password</em> to set their own.
-            </div>
-            {error && (
-              <div style={{background:"#fce8e8",border:"1px solid #e8a8a8",borderRadius:6,padding:"8px 12px",fontSize:12,color:"#8b2020",marginTop:10}}>
-                {error}
-              </div>
-            )}
-            <label style={labelStyle}>Email address</label>
-            <input style={inputStyle} type="email" placeholder="user@patioproducts.com"
-              value={email} onChange={e=>setEmail(e.target.value)} autoFocus />
-
-            <label style={labelStyle}>Role</label>
-            <select style={inputStyle} value={role} onChange={e=>setRole(e.target.value)}>
-              <option value="viewer">viewer — Sheet View, no exports</option>
-              <option value="manager">manager — All views, CSV export</option>
-              <option value="admin">admin — Full access</option>
-              <option value="commercial">commercial — Commercial tier only</option>
-              <option value="wholesale">wholesale — Wholesale tiers only</option>
-              <option value="retail">retail — Retail tier only</option>
-            </select>
-
-            <label style={labelStyle}>Temporary password</label>
-            <input style={inputStyle} type="text" placeholder="Min 8 characters"
-              value={tempPw} onChange={e=>setTempPw(e.target.value)} autoComplete="off" />
-            <div style={{fontSize:11,color:"var(--t4)",marginTop:4}}>
-              Share this with the user privately. They should change it on first login.
-            </div>
-
-            <button style={{...btnStyle, opacity: loading ? 0.7 : 1}} type="submit" disabled={loading}>
-              {loading ? "Creating…" : "Create User"}
-            </button>
-          </form>
+      {/* Results */}
+      <div style={{flex:1,overflow:"auto",padding:14,display:"flex",flexDirection:"column",gap:8}}>
+        {filtered.length===0 && (
+          <div className="empty"><h3>No flags match this filter</h3><p>Try "All flags" to see everything</p></div>
         )}
+        {filtered.map(r=>(
+          <div key={r.parent_id}
+            style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:8,padding:"10px 14px",cursor:"pointer",transition:"border-color .15s,box-shadow .15s"}}
+            onClick={()=>onSelectProduct(r)}
+            onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--err)";e.currentTarget.style.boxShadow="0 0 0 2px var(--err-bg)";}}
+            onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--b1)";e.currentTarget.style.boxShadow="none";}}>
+            <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:6}}>
+              <span className="flag-badge">{r.flags.length}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontFamily:"var(--fd)",fontWeight:600,fontSize:12,color:"var(--text)",marginBottom:1}}>{r.parent_name}</div>
+                <div style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)"}}>
+                  {r.parent_sku} · {r.category}
+                </div>
+              </div>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {r.flags.map((f,i)=>(
+                <span key={i} className="flag-row-badge">{f}</span>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1611,63 +1491,45 @@ function CreateUserModal({ user, onClose }) {
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user,         setUser]        = useState(null);
-  const [dark,         setDark]        = useState(false);
-  const [showImages,   setShowImages]  = useState(true);
-  const [view,         setView]        = useState("browse");
-  const [search,       setSearch]      = useState("");
-  const [category,     setCategory]    = useState("All");
-  const [sortBy,       setSortBy]      = useState("name");
+  const [dark,         setDark]         = useState(false);
+  const [showImages,   setShowImages]   = useState(true);
+  const [view,         setView]         = useState("browse");
+  const [search,       setSearch]       = useState("");
+  const [category,     setCategory]     = useState("All");
+  const [sortBy,       setSortBy]       = useState("name");
   const [selectedProd, setSelectedProd] = useState(null);
-  const [focusChildSku,setFocusChildSku] = useState(null);
-  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [focusChildSku,setFocusChildSku]= useState(null);
+  const [flagFilter,   setFlagFilter]   = useState(false); // show only flagged products in browse
 
-  // ── LIVE DATA ──
+  const user = HARDCODED_USER;
+  const caps = getRoleCapabilities(user.role);
+
   const [allData,   setAllData]   = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [loadError, setLoadError] = useState(null);
 
-  // ── RESTORE SESSION on mount ──
-  useEffect(() => {
-    const saved = loadSession();
-    if (saved) {
-      const u = extractUserFromToken(saved);
-      if (u && u.expiresAt > Date.now()) {
-        setUser(u);
-      } else {
-        clearSession();
-      }
-    }
-  }, []);
-
-  // ── FETCH DATA after user is set ──
-  useEffect(() => {
-    if (!user) return;
+  useEffect(()=>{
     setLoading(true);
     setLoadError(null);
-    fetch("/.netlify/functions/sheet-data", {
-      headers: { Authorization: `Bearer ${user.accessToken}` },
-    })
-      .then(r => r.json())
-      .then(rows => { setAllData(rows); setLoading(false); })
-      .catch(err => { setLoadError(err.message); setLoading(false); });
-  }, [user]);
+    fetch("/.netlify/functions/sheet-data")
+      .then(r=>r.json())
+      .then(rows=>{ setAllData(rows); setLoading(false); })
+      .catch(err=>{ setLoadError(err.message); setLoading(false); });
+  },[]);
 
-  async function handleSignOut() {
-    try {
-      await fetch(`${GOTRUE_BASE}/logout`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${user.accessToken}` },
-      });
-    } catch {} // best-effort
-    clearSession();
-    setUser(null);
-    setAllData([]);
-  }
+  // Compute red flags (memoized — expensive)
+  const flagMap = useMemo(()=>{
+    if (!allData.length) return {};
+    const results = computeRedFlags(allData);
+    const m = {};
+    results.forEach(r=>{ m[r.parent_id]=r.flags; });
+    return m;
+  },[allData]);
 
-  const caps = user ? getRoleCapabilities(user.role) : null;
+  const flaggedParentIds = useMemo(()=>new Set(Object.keys(flagMap)),[flagMap]);
+  const totalFlaggedCount = flaggedParentIds.size;
 
-  const allProducts = useMemo(() => getProducts(allData), [allData]);
+  const allProducts = useMemo(()=>getProducts(allData),[allData]);
 
   const categories = useMemo(()=>{
     const m={};
@@ -1675,66 +1537,51 @@ export default function App() {
     return Object.keys(m).sort();
   },[allProducts]);
 
-  // Build map of parent_id -> child SKUs for variant SKU search
   const childSkuMap = useMemo(()=>{
-    const m = {};
-    allData.forEach(r => {
-      if (!m[r.parent_id]) m[r.parent_id] = new Set();
-      m[r.parent_id].add(r.child_sku);
-    });
+    const m={};
+    allData.forEach(r=>{ if(!m[r.parent_id]) m[r.parent_id]=new Set(); m[r.parent_id].add(r.child_sku); });
     return m;
-  }, [allData]);
+  },[allData]);
 
   const filtered = useMemo(()=>{
     let list = allProducts;
-    const effectiveCat = search ? "All" : category;
+    const effectiveCat = search?"All":category;
     if(effectiveCat!=="All") list=list.filter(p=>p.category===effectiveCat);
     if(search){
       const q=search.toLowerCase();
       list=list.filter(p=>
-        p.parent_name.toLowerCase().includes(q) ||
-        p.parent_sku.toLowerCase().includes(q) ||
+        p.parent_name.toLowerCase().includes(q)||
+        p.parent_sku.toLowerCase().includes(q)||
         [...(childSkuMap[p.parent_id]||[])].some(sku=>sku.toLowerCase().includes(q))
       );
     }
+    if(flagFilter) list=list.filter(p=>flaggedParentIds.has(p.parent_id));
     return [...list].sort((a,b)=>{
       if(sortBy==="name") return a.parent_name.localeCompare(b.parent_name);
       if(sortBy==="sku")  return a.parent_sku.localeCompare(b.parent_sku);
       if(sortBy==="cat")  return a.category.localeCompare(b.category);
       return 0;
     });
-  },[allProducts,childSkuMap,category,search,sortBy]);
+  },[allProducts,childSkuMap,category,search,sortBy,flagFilter,flaggedParentIds]);
 
-  // When search yields exactly one result and matches a child SKU, auto-select it
   useEffect(()=>{
-    if(search && filtered.length === 1) {
-      const q = search.toLowerCase();
+    if(search&&filtered.length===1){
+      const q=search.toLowerCase();
       setSelectedProd(filtered[0]);
-      const matchingSku = [...(childSkuMap[filtered[0].parent_id]||[])].find(sku=>sku.toLowerCase().includes(q));
-      setFocusChildSku(matchingSku || null);
-    } else if(!search) {
-      setFocusChildSku(null);
-    }
-  },[search, filtered]);
+      const matchingSku=[...(childSkuMap[filtered[0].parent_id]||[])].find(sku=>sku.toLowerCase().includes(q));
+      setFocusChildSku(matchingSku||null);
+    } else if(!search){ setFocusChildSku(null); }
+  },[search,filtered]);
 
   function getWsPrice(pid) {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
   }
 
-  // ── AUTH GATE ──
-  if (!user) return (
-    <div className={`app${dark?" dark":""}`}>
-      <style>{CSS}</style>
-      <AuthGate onLogin={u=>{ setUser(u); setView("browse"); }} dark={dark} setDark={setDark}/>
-    </div>
-  );
-
-  // ── LOADING ──
   if (loading) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
       <div className="loading-wrap">
-        <LogoImg size={48} className="auth-logo" />
+        <LogoImg size={48} className="auth-logo"/>
         <div className="spinner"/>
         <div style={{textAlign:"center",display:"flex",flexDirection:"column",gap:4}}>
           <div style={{fontFamily:"var(--fd)",fontSize:15,color:"var(--text)"}}>Loading pricing data…</div>
@@ -1744,15 +1591,15 @@ export default function App() {
     </div>
   );
 
-  // ── LOAD ERROR ──
   if (loadError) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
       <div className="loading-wrap">
         <div style={{fontFamily:"var(--fd)",fontSize:18,color:"var(--err)"}}>Failed to load pricing data</div>
         <div style={{fontFamily:"var(--fm)",fontSize:11,color:"var(--t3)"}}>{loadError}</div>
-        <button className="btn btn-a" onClick={()=>{ setLoading(true); setLoadError(null);
-          fetch("/.netlify/functions/sheet-data",{headers:{Authorization:`Bearer ${user.accessToken}`}})
+        <button className="btn btn-a" onClick={()=>{
+          setLoading(true);setLoadError(null);
+          fetch("/.netlify/functions/sheet-data")
             .then(r=>r.json()).then(rows=>{setAllData(rows);setLoading(false);})
             .catch(err=>{setLoadError(err.message);setLoading(false);});
         }}>Retry</button>
@@ -1766,9 +1613,8 @@ export default function App() {
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
 
-      {/* TOPBAR */}
       <header className="topbar">
-        <LogoImg size={30} className="logo" />
+        <LogoImg size={30} className="logo"/>
         <span className="brand">PriceMatrix</span>
         <div className="divider"/>
         <nav className="nav">
@@ -1779,42 +1625,33 @@ export default function App() {
           {caps.canViewCustomers && (
             <button className={`nav-btn ${view==="customer"?"active":""}`} onClick={()=>setView("customer")}>👤 Customer View</button>
           )}
+          <button className={`nav-btn ${view==="flags"?"active":""}`}
+            style={view==="flags"?{color:"var(--err)",background:"var(--err-bg)",border:"1px solid rgba(201,64,64,.25)"}:{color:"var(--err)"}}
+            onClick={()=>setView("flags")}>
+            ▲ Flags {totalFlaggedCount>0&&<span style={{fontFamily:"var(--fm)",fontSize:9,background:"var(--err)",color:"#fff",padding:"0px 5px",borderRadius:20,marginLeft:3}}>{totalFlaggedCount}</span>}
+          </button>
         </nav>
         <div className="topbar-end">
           {caps.canSync && (
             <button className="btn no-print"
-              style={{opacity:0.5,cursor:"not-allowed",borderColor:"var(--brand)",color:"var(--brand)",fontSize:11,display:"flex",alignItems:"center",gap:5}}
+              style={{opacity:.5,cursor:"not-allowed",borderColor:"var(--brand)",color:"var(--brand)",fontSize:11,display:"flex",alignItems:"center",gap:5}}
               onClick={e=>e.preventDefault()}
               title="Coming soon — will trigger n8n to pull latest pricing from the website">
               ↻ Update Prices from Website
               <span className="badge-soon">COMING SOON</span>
             </button>
           )}
-          {user?.role === "admin" && (
-            <button className="btn no-print"
-              style={{borderColor:"var(--brand)",color:"var(--brand)",fontSize:11,display:"flex",alignItems:"center",gap:5}}
-              onClick={()=>setShowCreateUser(true)}
-              title="Create a new user account">
-              + Add User
-            </button>
-          )}
           <button className="theme-btn" onClick={()=>setDark(d=>!d)} title={dark?"Switch to light mode":"Switch to dark mode"}>
-            {dark ? "☀" : "◑"}
+            {dark?"☀":"◑"}
           </button>
           <button className="theme-btn" onClick={()=>setShowImages(s=>!s)} title={showImages?"Hide images":"Show images"}
             style={!showImages?{color:"var(--t4)"}:{}}>
             ⊟
           </button>
-          <div className="user-chip" onClick={handleSignOut} title="Click to sign out">
-            <div className="user-avatar">{user.name[0].toUpperCase()}</div>
-            {user.name}
-            <span className="role-badge">{user.role}</span>
-          </div>
         </div>
       </header>
 
       <div className="body">
-        {/* SIDEBAR */}
         {showSidebar && (
           <aside className="sidebar">
             {view==="browse" && (
@@ -1826,28 +1663,39 @@ export default function App() {
             <div className="sb-sec">
               <div className="sb-lbl">Category</div>
               <div className="cat-list">
-                <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>{ setCategory("All"); setSelectedProd(null); }}>
+                <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>{setCategory("All");setSelectedProd(null);}}>
                   All <span className="cat-cnt">{allProducts.length}</span>
                 </button>
                 {categories.map(cat=>(
-                  <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>{ setCategory(cat); setSelectedProd(null); }}>
+                  <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>{setCategory(cat);setSelectedProd(null);}}>
                     {cat} <span className="cat-cnt">{allProducts.filter(p=>p.category===cat).length}</span>
                   </button>
                 ))}
               </div>
             </div>
             {view==="browse" && (
-              <div className="sb-sec">
-                <div className="sb-lbl">Sort</div>
-                <select className="sel" value={sortBy} onChange={e=>setSortBy(e.target.value)}>
-                  <option value="name">Name A→Z</option>
-                  <option value="sku">SKU</option>
-                  <option value="cat">Category</option>
-                </select>
-              </div>
+              <>
+                <div className="sb-sec">
+                  <div className="sb-lbl">Sort</div>
+                  <select className="sel" value={sortBy} onChange={e=>setSortBy(e.target.value)}>
+                    <option value="name">Name A→Z</option>
+                    <option value="sku">SKU</option>
+                    <option value="cat">Category</option>
+                  </select>
+                </div>
+                <div className="sb-sec">
+                  <div className="sb-lbl">Data Quality</div>
+                  <button className={`cat-btn ${flagFilter?"on":""}`}
+                    style={flagFilter?{background:"var(--err-bg)",color:"var(--err)"}:{color:"var(--err)"}}
+                    onClick={()=>{setFlagFilter(f=>!f);setSelectedProd(null);}}>
+                    ▲ Flagged only
+                    {totalFlaggedCount>0&&<span className="cat-cnt" style={{color:"var(--err)"}}>{totalFlaggedCount}</span>}
+                  </button>
+                </div>
+              </>
             )}
             <div className="sb-sec" style={{flex:1}}>
-              <div className="sb-lbl">Tiers (your access)</div>
+              <div className="sb-lbl">Tiers</div>
               <div className="tier-legend">
                 {caps.tiers.map(t=>(
                   <div key={t} className="tleg-row">
@@ -1857,34 +1705,36 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              {user.role==="admin" && (
-                <p className="oem-note">OEM tier hidden.<br/>Replaced by customer‑specific pricing.</p>
-              )}
             </div>
           </aside>
         )}
 
-        {/* MAIN */}
         <div className="main">
-          {/* BROWSE */}
           {view==="browse" && (
             <>
               <div className="grid">
-                {filtered.length===0 && <div className="empty"><h3>No products found</h3><p>Adjust search or category</p></div>}
+                {filtered.length===0&&<div className="empty"><h3>No products found</h3><p>Adjust search or category</p></div>}
                 {filtered.map(p=>{
-                  const wsPrice = getWsPrice(p.parent_id);
-                  const vars = getVariants(allData, p.parent_id);
-                  const isSimple = vars.length===1&&vars[0].variant_name==="Simple";
+                  const wsPrice=getWsPrice(p.parent_id);
+                  const vars=getVariants(allData,p.parent_id);
+                  const isSimple=vars.length===1&&vars[0].variant_name==="Simple";
+                  const myFlagCount=(flagMap[p.parent_id]||[]).length;
                   return (
                     <div key={p.parent_id} className={`pcard ${selectedProd?.parent_id===p.parent_id?"on":""}`}
                       onClick={()=>setSelectedProd(p)}>
-                      {showImages && (
+                      {showImages&&(
                         <div className="pcard-img-wrap">
+                          {myFlagCount>0&&<span className="pcard-flag">▲{myFlagCount}</span>}
                           <img className="pcard-img" src={p.image_url} alt={p.parent_name}
-                            onError={e=>{ e.target.style.display="none"; e.target.nextSibling.style.display="flex"; }}/>
+                            onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="flex";}}/>
                           <div className="pcard-img-ph" style={{display:"none"}}>
                             <span>{p.category?.[0]}</span>
                           </div>
+                        </div>
+                      )}
+                      {!showImages&&myFlagCount>0&&(
+                        <div style={{padding:"4px 8px",background:"var(--err-bg)",borderBottom:"1px solid rgba(201,64,64,.15)"}}>
+                          <span className="flag-row-badge">▲{myFlagCount} flag{myFlagCount!==1?"s":""}</span>
                         </div>
                       )}
                       <div className="pcard-body">
@@ -1901,11 +1751,10 @@ export default function App() {
                   );
                 })}
               </div>
-
               {selectedProd ? (
                 <DetailPanel key={selectedProd.parent_id} product={selectedProd} visibleTiers={caps.tiers}
                   onClose={()=>{setSelectedProd(null);setFocusChildSku(null);}}
-                  allData={allData} focusChildSku={focusChildSku} caps={caps}/>
+                  allData={allData} focusChildSku={focusChildSku} caps={caps} flagMap={flagMap}/>
               ) : (
                 <div className="detail" style={{display:"flex"}}>
                   <div className="nosel">
@@ -1918,22 +1767,24 @@ export default function App() {
             </>
           )}
 
-          {/* SHEET VIEW */}
           {view==="sheet" && caps.canViewSheet && (
-            <SheetView category={category} visibleTiers={caps.tiers} allData={allData} caps={caps}/>
+            <SheetView visibleTiers={caps.tiers} allData={allData} caps={caps}/>
           )}
 
-          {/* CUSTOMER VIEW */}
           {view==="customer" && caps.canViewCustomers && (
             <CustomerView allData={allData} caps={caps}/>
           )}
+
+          {view==="flags" && (
+            <FlagsView allData={allData} onSelectProduct={p=>{
+              setView("browse");
+              setSelectedProd(p);
+              setSearch("");
+              setCategory("All");
+            }}/>
+          )}
         </div>
       </div>
-
-      {/* CREATE USER MODAL — admin only */}
-      {showCreateUser && (
-        <CreateUserModal user={user} onClose={()=>setShowCreateUser(false)} />
-      )}
     </div>
   );
 }
