@@ -241,21 +241,28 @@ function computeRedFlags(data) {
       addFlag(parentId, "Missing or zero Wholesale_L3 base price");
     }
 
-    // Flag 5: No quantity discounts for a given tier (only one qty break ≠ 0)
+    // Flag 5: No quantity discounts — check across all tiers, consolidate into one flag
     const tierBreaks = {};
     rows.forEach(r => {
       if (r.qty_break === 1) return; // skip sentinel
       (tierBreaks[r.tier] ??= new Set()).add(r.qty_break);
     });
-    TIERS.forEach(tier => {
+    const tiersWithNoDiscounts = TIERS.filter(tier => {
       const breaks = [...(tierBreaks[tier]||[])].filter(b=>b!==0);
-      if (breaks.length === 0 && tierBreaks[tier]?.has(0)) {
-        addFlag(parentId, `No quantity discounts for ${tier}`);
-      }
+      return breaks.length === 0 && tierBreaks[tier]?.has(0);
     });
+    if (tiersWithNoDiscounts.length === TIERS.length) {
+      addFlag(parentId, "No quantity discounts on any tier");
+    } else if (tiersWithNoDiscounts.length > 0) {
+      addFlag(parentId, `No quantity discounts for: ${tiersWithNoDiscounts.join(", ")}`);
+    }
 
-    // Flag 6: Variable product with only 1 variant (parent_id ≠ child_id but no siblings)
-    if (childIds.length === 1 && childIds[0] !== parentId) {
+    // Flag 6: Variable product with only 1 variant (parent_id ≠ child_id, not Simple, and no siblings)
+    const isSimpleProduct = childIds.length === 1 && (
+      childIds[0] === parentId ||
+      rows.some(r => r.child_id === childIds[0] && decodeEntities(r.variant_name) === "Simple")
+    );
+    if (childIds.length === 1 && !isSimpleProduct) {
       addFlag(parentId, "Variable product with only 1 variant");
     }
 
@@ -541,17 +548,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .s-price-qty{color:var(--t2)}
 .cat-hdr td{padding:5px 12px;background:var(--s3);border-bottom:1px solid var(--b2);border-top:1px solid var(--b2);font-family:var(--fd);font-size:9px;color:var(--brand);font-weight:700;letter-spacing:.1em;text-transform:uppercase;}
 
-/* Cat multi-select dropdown */
-.cat-multi-wrap{position:relative}
-.cat-multi-btn{padding:5px 10px;border-radius:6px;border:1px solid var(--b2);background:var(--s2);color:var(--t2);font-family:var(--fm);font-size:11px;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px}
-.cat-multi-btn:hover{background:var(--s3)}
-.cat-multi-btn.has-excl{border-color:var(--brand);color:var(--brand)}
-.cat-multi-drop{position:absolute;top:calc(100% + 4px);left:0;background:var(--s1);border:1px solid var(--b2);border-radius:8px;padding:6px;z-index:200;box-shadow:var(--shadow);min-width:220px;max-height:320px;overflow-y:auto}
-.cat-multi-item{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:11px;font-family:var(--fb);color:var(--t2);transition:background .1s;user-select:none}
-.cat-multi-item:hover{background:var(--s3);color:var(--text)}
-.cat-multi-item.excl{color:var(--err);text-decoration:line-through;opacity:.7}
-.cat-multi-sep{height:1px;background:var(--b1);margin:5px 0}
-
 /* ── CUSTOMER VIEW ── */
 .custv{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .cust-bar{padding:9px 14px;border-bottom:1px solid var(--b1);background:var(--s1);display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;}
@@ -603,7 +599,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .body,.main{display:block!important;height:auto!important;overflow:visible!important}
   .detail{width:100%!important;border:none!important}
   .grid{display:none!important}
-  body{background:#fff!important;color:#000!important}
+  body{background:#fff!important;color:#000!important;font-size:10px}
   .pt th,.pt td{border-color:#ddd!important}
   .pc-ws,.pc-above,.pc-below,.pc-qty{color:#000!important}
   .pct{display:none!important}
@@ -612,16 +608,42 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .ct th,.ct td,.st th,.st td{border-color:#ddd!important;color:#000!important;background:#fff!important}
   .cat-hdr td{background:#f0f0f0!important;color:#333!important}
   .sheet{display:block!important;height:auto!important}
-  .print-hdr{display:block!important}
-  .print-watermark{display:block!important}
-  .st{page-break-inside:auto}
-  .st tr{page-break-inside:avoid}
-  .cat-hdr{page-break-after:avoid}
+  .sheet-wrap{display:none!important}
+  .print-only{display:block!important}
+  /* Product detail: keep each variant block together */
+  .ptw,.msec{page-break-inside:avoid!important}
+  /* Footer watermark on every page via fixed positioning */
+  body::after{
+    content:"CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute";
+    position:fixed;bottom:8mm;left:0;right:0;
+    text-align:center;font-size:7pt;color:#aaa;
+    font-family:'DM Mono',monospace;letter-spacing:.03em;
+    border-top:1px solid #e0e0e0;padding-top:3mm;
+  }
 }
+.print-only{display:none}
 .print-hdr{display:none;padding:0 0 14px 0}
 .print-hdr h1{font-family:'Syne',sans-serif;font-size:18px;color:#000;margin-bottom:3px}
 .print-hdr p{font-size:11px;color:#555;font-family:'DM Sans',sans-serif}
-.print-watermark{display:none;margin-top:12px;padding:7px 10px;border:1px solid #ddd;border-radius:4px;font-family:'DM Mono',monospace;font-size:9px;color:#999;text-align:center}
+
+/* Per-category print sections */
+.print-cat-section{page-break-before:always;padding-bottom:16mm}
+.print-cat-section:first-of-type{page-break-before:avoid}
+.print-cat-title{font-family:'Syne',sans-serif;font-weight:700;font-size:13pt;color:#1a2530;
+  border-bottom:2px solid #3a7d58;padding-bottom:4px;margin-bottom:8px;margin-top:14px;
+  text-transform:uppercase;letter-spacing:.05em}
+.print-table{width:100%;border-collapse:collapse;font-family:'DM Mono',monospace;font-size:8.5pt}
+.print-table th{padding:4px 8px;text-align:left;background:#f4f6f8;border-bottom:1px solid #ccd4dc;
+  font-size:7.5pt;text-transform:uppercase;letter-spacing:.06em;color:#555;white-space:nowrap}
+.print-th-price{text-align:right!important}
+.print-table td{padding:3px 8px;border-bottom:1px solid #e8ecf0;vertical-align:top}
+.print-td-price{text-align:right;font-variant-numeric:tabular-nums}
+.print-td-sku{color:#666;font-size:7.5pt;white-space:nowrap}
+.print-pname{font-family:'DM Sans',sans-serif;font-weight:600;font-size:9pt;color:#1a2530}
+.print-pvar{font-family:'DM Sans',sans-serif;font-size:7.5pt;color:#4a5f70;margin-top:1px}
+.print-tr{page-break-inside:avoid}
+
+.print-watermark{display:none}
 .print-cust-hdr{display:none;padding:0 0 18px 0}
 .print-cust-hdr h1{font-family:'Syne',sans-serif;font-size:20px;color:#000;margin-bottom:4px}
 .print-cust-hdr p{font-size:12px;color:#666;font-family:'DM Sans',sans-serif}
@@ -656,55 +678,6 @@ function WatermarkBar() {
   return (
     <div className="watermark-bar no-print">
       🔒 CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
-    </div>
-  );
-}
-
-// ─── CATEGORY MULTI-SELECT ────────────────────────────────────────────────────
-function CategoryMultiSelect({ categories, excluded, onChange }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-
-  useEffect(() => {
-    function handler(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  function toggle(cat) {
-    const next = new Set(excluded);
-    if (next.has(cat)) next.delete(cat);
-    else next.add(cat);
-    onChange(next);
-  }
-
-  const visCount = categories.length - excluded.size;
-  const hasCustom = excluded.size > 0;
-
-  return (
-    <div className="cat-multi-wrap" ref={ref}>
-      <button className={`cat-multi-btn ${hasCustom?"has-excl":""}`} onClick={()=>setOpen(o=>!o)}>
-        ⊞ Categories {hasCustom ? `(${excluded.size} hidden)` : ""} ▾
-      </button>
-      {open && (
-        <div className="cat-multi-drop">
-          <div style={{padding:"2px 8px 6px",fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>
-            Showing {visCount} of {categories.length} — click to hide/show
-          </div>
-          <div className="cat-multi-sep"/>
-          <div style={{display:"flex",gap:5,padding:"2px 4px 6px"}}>
-            <button className="btn" style={{fontSize:9,padding:"2px 7px"}} onClick={()=>onChange(new Set(DEFAULT_EXCLUDED_CATEGORIES.filter(c=>categories.includes(c))))}>Reset defaults</button>
-            <button className="btn" style={{fontSize:9,padding:"2px 7px"}} onClick={()=>onChange(new Set())}>Show all</button>
-          </div>
-          <div className="cat-multi-sep"/>
-          {categories.map(cat => (
-            <div key={cat} className={`cat-multi-item ${excluded.has(cat)?"excl":""}`} onClick={()=>toggle(cat)}>
-              <span style={{fontSize:12}}>{excluded.has(cat)?"☐":"☑"}</span>
-              <span>{cat}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -978,17 +951,10 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
 }
 
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
-function SheetView({ visibleTiers, allData, caps }) {
-  const [tier,     setTier]     = useState(visibleTiers[0]||"Wholesale");
-  const [search,   setSearch]   = useState("");
-  const [excluded, setExcluded] = useState(()=>new Set(DEFAULT_EXCLUDED_CATEGORIES));
+function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCategories }) {
+  const [tier,   setTier]   = useState(visibleTiers[0]||"Wholesale");
+  const [search, setSearch] = useState("");
   const activeTier = visibleTiers.includes(tier)?tier:visibleTiers[0];
-
-  const allCategories = useMemo(()=>{
-    const s = new Set();
-    allData.forEach(r=>{ if(r.category) s.add(decodeEntities(r.category)); });
-    return [...s].sort();
-  },[allData]);
 
   const data = useMemo(()=>getTierFlat(allData,activeTier),[allData,activeTier]);
   const color = TIER_COLORS[activeTier];
@@ -996,7 +962,6 @@ function SheetView({ visibleTiers, allData, caps }) {
 
   const rows = useMemo(()=>{
     let entries = Object.entries(data);
-    // Exclude hidden categories (unless searching)
     if (!search) entries = entries.filter(([,v])=>!excluded.has(v.category));
     if (search) {
       const q=search.toLowerCase();
@@ -1010,7 +975,7 @@ function SheetView({ visibleTiers, allData, caps }) {
     });
   },[data,excluded,search]);
 
-  // Per-category qty breaks (only breaks present in that category's rows)
+  // Per-category qty breaks
   const catBreaksMap = useMemo(()=>{
     const m = {};
     rows.forEach(([,v])=>{
@@ -1024,11 +989,21 @@ function SheetView({ visibleTiers, allData, caps }) {
     return m;
   },[rows]);
 
-  // Global breaks (for CSV export header)
+  // Global breaks for CSV/header
   const allBreaks = useMemo(()=>{
     const s = new Set();
     rows.forEach(([,v])=>Object.keys(v).filter(k=>!isNaN(k)).map(Number).filter(b=>b!==1).forEach(b=>{ if(v[b]!=null) s.add(b); }));
     return [...s].sort((a,b)=>a-b);
+  },[rows]);
+
+  // Group rows by category for per-category print tables
+  const rowsByCategory = useMemo(()=>{
+    const m = new Map();
+    rows.forEach(([sku,v])=>{
+      if(!m.has(v.category)) m.set(v.category,[]);
+      m.get(v.category).push([sku,v]);
+    });
+    return m;
   },[rows]);
 
   function handleCSV() {
@@ -1049,32 +1024,20 @@ function SheetView({ visibleTiers, allData, caps }) {
   }
 
   function handleXLSX() {
-    // Build XLSX with one sheet per category using SheetJS
-    // Dynamically load SheetJS if not present
     if (!window.XLSX) {
       const s = document.createElement("script");
       s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
       s.onload = () => buildXLSX();
       document.head.appendChild(s);
-    } else {
-      buildXLSX();
-    }
+    } else { buildXLSX(); }
 
     function buildXLSX() {
       const wb = window.XLSX.utils.book_new();
       wb.Props = { Title:"PriceMatrix Export", Author:"Patio Products, Inc." };
-
-      // Group rows by category
-      const byCat = {};
-      rows.forEach(([sku,v])=>{
-        (byCat[v.category]??=[]).push([sku,v]);
-      });
-
-      Object.entries(byCat).forEach(([cat, catRows])=>{
+      rowsByCategory.forEach((catRows, cat)=>{
         const catBreaks = catBreaksMap[cat]||allBreaks;
         const headers = ["SKU","Parent SKU","Product","Variant","Category",...catBreaks.map(q=>q===0?"Regular Price":`Qty ${q}+`)];
         const dataRows = catRows.map(([sku,v])=>[sku,v.parent_sku,v.parent_name,v.variant_name,v.category,...catBreaks.map(q=>v[q]??null)]);
-        // Sheet name max 31 chars, strip invalid chars
         const sheetName = cat.replace(/[:\\/?*[\]]/g,"").slice(0,31);
         const ws = window.XLSX.utils.aoa_to_sheet([
           [`CONFIDENTIAL — Property of Patio Products, Inc. Not for distribution.`],
@@ -1083,44 +1046,66 @@ function SheetView({ visibleTiers, allData, caps }) {
           headers,
           ...dataRows,
         ]);
-        // Style the watermark row (row 0) — note: SheetJS community doesn't support styles, but we set column widths
-        ws["!cols"] = [
-          {wch:16},{wch:14},{wch:36},{wch:20},{wch:18},
-          ...catBreaks.map(()=>({wch:12}))
-        ];
+        ws["!cols"] = [{wch:16},{wch:14},{wch:36},{wch:20},{wch:18},...catBreaks.map(()=>({wch:12}))];
         window.XLSX.utils.book_append_sheet(wb, ws, sheetName);
       });
-
-      // Summary sheet
-      const summaryData = [
+      const summaryWs = window.XLSX.utils.aoa_to_sheet([
         ["CONFIDENTIAL — Property of Patio Products, Inc."],
         [`Export: ${activeTier} pricing`],
         [`Generated: ${today}`],
-        [`Categories included: ${Object.keys(byCat).join(", ")}`],
-        [],
-        ["For pricing questions contact Patio Products, Inc."],
-      ];
-      const summaryWs = window.XLSX.utils.aoa_to_sheet(summaryData);
+        [`Categories included: ${[...rowsByCategory.keys()].join(", ")}`],
+        [],["For pricing questions contact Patio Products, Inc."],
+      ]);
       window.XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
-
       window.XLSX.writeFile(wb, `${activeTier}-prices.xlsx`);
     }
   }
 
-  let lastCat = null;
-
   return (
     <div className="sheet">
-      {/* Print header */}
-      <div className="print-hdr">
-        <h1>Price List — {activeTier}</h1>
-        <p>Patio Products, Inc. · Prepared {today} · Prices subject to change without notice</p>
-      </div>
-      <div className="print-watermark">
-        CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
+      {/* ── PRINT-ONLY LAYOUT: one section per category, each starts new page ── */}
+      <div className="print-only">
+        <div className="print-hdr">
+          <h1>Price List — {activeTier}</h1>
+          <p>Patio Products, Inc. · Prepared {today} · Prices subject to change without notice</p>
+        </div>
+        {[...rowsByCategory.entries()].map(([cat, catRows])=>{
+          const catBreaks = catBreaksMap[cat]||allBreaks;
+          return (
+            <div key={cat} className="print-cat-section">
+              <div className="print-cat-title">{cat}</div>
+              <table className="print-table">
+                <thead>
+                  <tr>
+                    <th className="print-th-name">Product / Variant</th>
+                    <th className="print-th-sku">SKU</th>
+                    {catBreaks.map(q=><th key={q} className="print-th-price">{q===0?"Price":`${q}+`}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {catRows.map(([sku,v])=>(
+                    <tr key={sku} className="print-tr">
+                      <td className="print-td-name">
+                        <div className="print-pname">{v.parent_name}</div>
+                        {v.variant_name!=="Simple"&&<div className="print-pvar">{v.variant_name}</div>}
+                      </td>
+                      <td className="print-td-sku">{sku}</td>
+                      {catBreaks.map(q=>(
+                        <td key={q} className="print-td-price">
+                          {v[q]!=null ? fmt(v[q]) : "—"}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
       </div>
 
-      <div className="sheet-bar">
+      {/* ── SCREEN TOOLBAR ── */}
+      <div className="sheet-bar no-print">
         <div className="tier-pills">
           {visibleTiers.map(t=>(
             <button key={t} className="tier-pill"
@@ -1128,18 +1113,12 @@ function SheetView({ visibleTiers, allData, caps }) {
               onClick={()=>setTier(t)}>{t}</button>
           ))}
         </div>
-
-        <CategoryMultiSelect categories={allCategories} excluded={excluded} onChange={setExcluded}/>
-
         <input className="inp" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
-
-        <button className="btn" onClick={()=>window.print()} title="Print or save as PDF">⊞ Print / PDF</button>
-
-        {caps.canExportCSV && <button className="btn btn-o" onClick={handleCSV} title="Export as CSV (single sheet, all categories)">↓ CSV</button>}
-        {caps.canExportCSV && <button className="btn btn-o" onClick={handleXLSX} title="Export as Excel (one tab per category)">↓ XLSX</button>}
-        {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON} title="Export as JSON">↓ JSON</button>}
-
+        <button className="btn no-print" onClick={()=>window.print()} title="Print or save as PDF">⊞ Print / PDF</button>
+        {caps.canExportCSV  && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
+        {caps.canExportCSV  && <button className="btn btn-o" onClick={handleXLSX}>↓ XLSX</button>}
+        {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>}
         {caps.canExportSage && (
           <button className="btn" style={{borderColor:"var(--gold)",color:"var(--gold)",opacity:0.6,cursor:"not-allowed",display:"flex",alignItems:"center",gap:5}}
             title="Sage 50 price file export — item ID mapping in progress">
@@ -1150,13 +1129,13 @@ function SheetView({ visibleTiers, allData, caps }) {
 
       <WatermarkBar/>
 
-      <div className="sheet-wrap">
+      {/* ── SCREEN TABLE ── */}
+      <div className="sheet-wrap no-print">
         <table className="st">
           <thead>
             <tr>
               <th style={{minWidth:200,maxWidth:260,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{minWidth:90,position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}>SKU</th>
-              {/* We render per-category breaks — for the header row we show a placeholder; actual data uses cat-level breaks */}
               {allBreaks.map(q=>(
                 <th key={q} className="r" style={{color:q===0?color:undefined,width:"1px",whiteSpace:"nowrap"}}>
                   {q===0?"Price":`${q}+`}
@@ -1165,7 +1144,7 @@ function SheetView({ visibleTiers, allData, caps }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map(([sku,v])=>{
+            {(()=>{ let lastCat=null; return rows.map(([sku,v])=>{
               const showCat = v.category!==lastCat;
               lastCat = v.category;
               const catBreaks = catBreaksMap[v.category]||allBreaks;
@@ -1194,7 +1173,7 @@ function SheetView({ visibleTiers, allData, caps }) {
                   })}
                 </tr>
               ].filter(Boolean);
-            })}
+            });})()}
           </tbody>
         </table>
       </div>
@@ -1499,7 +1478,9 @@ export default function App() {
   const [sortBy,       setSortBy]       = useState("name");
   const [selectedProd, setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku]= useState(null);
-  const [flagFilter,   setFlagFilter]   = useState(false); // show only flagged products in browse
+  const [flagFilter,   setFlagFilter]   = useState(false);
+  // Sheet view category exclusions — lifted to root so sidebar can control them
+  const [sheetExcluded, setSheetExcluded] = useState(()=>new Set(DEFAULT_EXCLUDED_CATEGORIES));
 
   const user = HARDCODED_USER;
   const caps = getRoleCapabilities(user.role);
@@ -1530,6 +1511,12 @@ export default function App() {
   const totalFlaggedCount = flaggedParentIds.size;
 
   const allProducts = useMemo(()=>getProducts(allData),[allData]);
+
+  const allCategories = useMemo(()=>{
+    const s = new Set();
+    allData.forEach(r=>{ if(r.category) s.add(decodeEntities(r.category)); });
+    return [...s].sort();
+  },[allData]);
 
   const categories = useMemo(()=>{
     const m={};
@@ -1660,19 +1647,67 @@ export default function App() {
                 <input className="inp" placeholder="Name or SKU…" value={search} onChange={e=>setSearch(e.target.value)}/>
               </div>
             )}
-            <div className="sb-sec">
-              <div className="sb-lbl">Category</div>
-              <div className="cat-list">
-                <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>{setCategory("All");setSelectedProd(null);}}>
-                  All <span className="cat-cnt">{allProducts.length}</span>
-                </button>
-                {categories.map(cat=>(
-                  <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>{setCategory(cat);setSelectedProd(null);}}>
-                    {cat} <span className="cat-cnt">{allProducts.filter(p=>p.category===cat).length}</span>
-                  </button>
-                ))}
-              </div>
+
+            {/* Category list — single-select for Browse, checkbox-toggle for Sheet */}
+            <div className="sb-sec" style={{
+              flex: view==="sheet" ? 1 : undefined,
+              overflow: "hidden",
+              display:"flex", flexDirection:"column",
+            }}>
+              {view==="sheet" ? (
+                <>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                    <div className="sb-lbl" style={{marginBottom:0}}>Categories</div>
+                    <div style={{display:"flex",gap:3}}>
+                      <button className="btn" style={{fontSize:8,padding:"1px 5px"}} title="Reset to default exclusions"
+                        onClick={()=>setSheetExcluded(new Set(DEFAULT_EXCLUDED_CATEGORIES.filter(c=>allCategories.includes(c))))}>
+                        Reset
+                      </button>
+                      <button className="btn" style={{fontSize:8,padding:"1px 5px"}} title="Show all categories"
+                        onClick={()=>setSheetExcluded(new Set())}>
+                        All
+                      </button>
+                      <button className="btn" style={{fontSize:8,padding:"1px 5px"}} title="Hide all (select none)"
+                        onClick={()=>setSheetExcluded(new Set(allCategories))}>
+                        None
+                      </button>
+                    </div>
+                  </div>
+                  <div className="cat-list" style={{flex:1,maxHeight:"none"}}>
+                    {allCategories.map(cat=>{
+                      const isVisible = !sheetExcluded.has(cat);
+                      return (
+                        <button key={cat} className="cat-btn"
+                          style={isVisible?{}:{color:"var(--t4)"}}
+                          onClick={()=>{
+                            const next = new Set(sheetExcluded);
+                            isVisible ? next.add(cat) : next.delete(cat);
+                            setSheetExcluded(next);
+                          }}>
+                          <span style={{fontSize:11,marginRight:5,flexShrink:0,color:isVisible?"var(--brand)":"var(--t4)"}}>{isVisible?"☑":"☐"}</span>
+                          <span style={{flex:1,textAlign:"left",fontSize:11,textDecoration:isVisible?"none":"line-through"}}>{cat}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="sb-lbl">Category</div>
+                  <div className="cat-list">
+                    <button className={`cat-btn ${category==="All"?"on":""}`} onClick={()=>{setCategory("All");setSelectedProd(null);}}>
+                      All <span className="cat-cnt">{allProducts.length}</span>
+                    </button>
+                    {categories.map(cat=>(
+                      <button key={cat} className={`cat-btn ${category===cat?"on":""}`} onClick={()=>{setCategory(cat);setSelectedProd(null);}}>
+                        {cat} <span className="cat-cnt">{allProducts.filter(p=>p.category===cat).length}</span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
+
             {view==="browse" && (
               <>
                 <div className="sb-sec">
@@ -1692,20 +1727,20 @@ export default function App() {
                     {totalFlaggedCount>0&&<span className="cat-cnt" style={{color:"var(--err)"}}>{totalFlaggedCount}</span>}
                   </button>
                 </div>
+                <div className="sb-sec" style={{flex:1}}>
+                  <div className="sb-lbl">Tiers</div>
+                  <div className="tier-legend">
+                    {caps.tiers.map(t=>(
+                      <div key={t} className="tleg-row">
+                        <span className="tdot" style={{background:TIER_COLORS[t]}}/>
+                        <span style={{color:t==="Wholesale"?"var(--ws)":undefined}}>{t}</span>
+                        {t==="Wholesale"&&<span className="ws-tag">BASE</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </>
             )}
-            <div className="sb-sec" style={{flex:1}}>
-              <div className="sb-lbl">Tiers</div>
-              <div className="tier-legend">
-                {caps.tiers.map(t=>(
-                  <div key={t} className="tleg-row">
-                    <span className="tdot" style={{background:TIER_COLORS[t]}}/>
-                    <span style={{color:t==="Wholesale"?"var(--ws)":undefined}}>{t}</span>
-                    {t==="Wholesale"&&<span className="ws-tag">BASE</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
           </aside>
         )}
 
@@ -1768,7 +1803,8 @@ export default function App() {
           )}
 
           {view==="sheet" && caps.canViewSheet && (
-            <SheetView visibleTiers={caps.tiers} allData={allData} caps={caps}/>
+            <SheetView visibleTiers={caps.tiers} allData={allData} caps={caps}
+              excluded={sheetExcluded} setExcluded={setSheetExcluded} allCategories={allCategories}/>
           )}
 
           {view==="customer" && caps.canViewCustomers && (
