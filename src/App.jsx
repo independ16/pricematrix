@@ -136,18 +136,33 @@ function pctVsWholesale(price, wsPrice) {
   return ((price - wsPrice) / wsPrice) * 100;
 }
 
-function resolveCustomerPrice(data, customer, childSku, qty) {
+// Build a tier-price index for fast Customer View lookups:
+// index[child_sku][tier] = sorted array of {qty_break, price}
+function buildCustomerIndex(data) {
+  const idx = {};
+  data.forEach(r => {
+    if (r.qty_break === 1) return; // skip sentinel
+    (idx[r.child_sku] ??= {})[r.tier] ??= [];
+    idx[r.child_sku][r.tier].push({ qty_break: r.qty_break, price: r.price });
+  });
+  // Sort each tier's breaks descending so we can find the first applicable
+  Object.values(idx).forEach(tiers =>
+    Object.values(tiers).forEach(arr => arr.sort((a,b) => b.qty_break - a.qty_break))
+  );
+  return idx;
+}
+
+function resolveCustomerPriceFromIndex(idx, customer, childSku, qty) {
   const special = customer.special[childSku];
   if (special) {
     const specBreaks = Object.keys(special).map(Number).filter(b=>b!==1).sort((a,b)=>b-a);
     const match = specBreaks.find(b => qty >= b);
-    if (match !== undefined) return { price:special[match], isSpecial:true };
+    if (match !== undefined) return { price: special[match], isSpecial: true };
   }
-  const tierRows = data.filter(r => r.child_sku===childSku && r.tier===customer.tier && r.qty_break!==1);
-  const applicable = tierRows.map(r=>r.qty_break).filter(b=>b>0&&qty>=b);
-  const qb = applicable.length ? Math.max(...applicable) : 0;
-  const tierRow = tierRows.find(r=>r.qty_break===qb);
-  return { price:tierRow?.price??null, isSpecial:false };
+  const tierRows = idx[childSku]?.[customer.tier] || [];
+  const match = tierRows.find(r => qty >= r.qty_break);
+  const price = match ? match.price : (tierRows.find(r => r.qty_break === 0)?.price ?? null);
+  return { price, isSpecial: false };
 }
 
 function downloadCSV(filename, headers, rows) {
@@ -432,7 +447,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .grid{flex:1;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;align-content:start;}
 .pcard{background:var(--s1);border:1px solid var(--b1);border-radius:var(--r);overflow:hidden;cursor:pointer;transition:border-color .18s,box-shadow .18s,transform .18s;box-shadow:var(--shadow);min-height:80px;}
 .pcard:hover{border-color:var(--brand);transform:translateY(-1px);box-shadow:0 4px 16px rgba(72,147,103,.18)}
-.pcard.on{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand-dim)}
+.pcard.on{border-color:var(--brand);box-shadow:0 0 0 2px rgba(72,147,103,.35),0 2px 12px rgba(72,147,103,.2);background:var(--brand-dim)}
 .pcard-flag{position:absolute;top:6px;right:6px;background:var(--err);color:#fff;font-size:8px;font-family:var(--fm);padding:2px 5px;border-radius:3px;z-index:2;}
 .pcard-img-wrap{width:100%;height:110px;overflow:hidden;background:var(--s3);position:relative;flex-shrink:0}
 .pcard-img{width:100%;height:110px;object-fit:cover;display:block}
@@ -599,7 +614,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .body,.main{display:block!important;height:auto!important;overflow:visible!important}
   .detail{width:100%!important;border:none!important}
   .grid{display:none!important}
-  body{background:#fff!important;color:#000!important;font-size:10px}
+  body{background:#fff!important;color:#000!important;font-size:10px;margin-bottom:16mm}
+  @page{margin-bottom:18mm}
   .pt th,.pt td{border-color:#ddd!important}
   .pc-ws,.pc-above,.pc-below,.pc-qty{color:#000!important}
   .pct{display:none!important}
@@ -1115,7 +1131,7 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
         </div>
         <input className="inp" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
-        <button className="btn no-print" onClick={()=>window.print()} title="Print or save as PDF">⊞ Print / PDF</button>
+        <button className="btn btn-a no-print" onClick={()=>window.print()} title="Print or save as PDF">⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportCSV  && <button className="btn btn-o" onClick={handleXLSX}>↓ XLSX</button>}
         {caps.canExportJSON && <button className="btn btn-o" onClick={handleJSON}>↓ JSON</button>}
@@ -1189,11 +1205,17 @@ function CustomerView({ allData, caps }) {
   const [specialFilter, setSpecialFilter] = useState("all");
   const cust = MOCK_CUSTOMERS.find(c=>c.id===custId);
 
+  // Pre-build index once — avoids O(n) allData scan per variant×break
+  const custIdx = useMemo(()=>buildCustomerIndex(allData),[allData]);
+
   const custBreaks = useMemo(()=>{
     const breaks = new Set([0]);
-    allData.filter(r=>r.tier===cust.tier&&r.qty_break!==1).forEach(r=>breaks.add(r.qty_break));
+    // Use the index keys to find breaks for this tier
+    Object.values(custIdx).forEach(tiers=>{
+      (tiers[cust.tier]||[]).forEach(r=>breaks.add(r.qty_break));
+    });
     return [...breaks].sort((a,b)=>a-b);
-  },[allData,cust]);
+  },[custIdx,cust]);
 
   const categories = useMemo(()=>{
     const s = new Set();
@@ -1214,7 +1236,7 @@ function CustomerView({ allData, caps }) {
     variantMap.forEach((v,childSku)=>{
       const prices={};
       custBreaks.forEach(qty=>{
-        const {price,isSpecial}=resolveCustomerPrice(allData,cust,childSku,qty);
+        const {price,isSpecial}=resolveCustomerPriceFromIndex(custIdx,cust,childSku,qty);
         prices[qty]={price,isSpecial};
       });
       allVariants.push({...v,hasSpecial:!!cust.special[childSku],prices});
@@ -1224,7 +1246,7 @@ function CustomerView({ allData, caps }) {
       if(a.category!==b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[cust,allData,custBreaks]);
+  },[cust,custIdx,custBreaks,allData]);
 
   const effectiveCat = search?"All":category;
   const filtered = useMemo(()=>{
@@ -1343,8 +1365,8 @@ function CustomerView({ allData, caps }) {
   );
 }
 
-// ─── FLAGS VIEW ───────────────────────────────────────────────────────────────
-function FlagsView({ allData, onSelectProduct }) {
+// ─── FLAGS VIEW (REMOVED) — flag filtering is now a dropdown inside Browse ─────
+function _FlagsView_REMOVED({ allData, onSelectProduct }) {
   const [loading,     setLoading]     = useState(true);
   const [flagResults, setFlagResults] = useState([]);
   const [filterType,  setFilterType]  = useState("all");
@@ -1478,8 +1500,10 @@ export default function App() {
   const [sortBy,       setSortBy]       = useState("name");
   const [selectedProd, setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku]= useState(null);
-  const [flagFilter,   setFlagFilter]   = useState(false);
-  // Sheet view category exclusions — lifted to root so sidebar can control them
+  const [flagFilter,    setFlagFilter]    = useState(false);
+  // "none" = no flag filter, or one of the FLAG_TYPE ids
+  const [flagTypeFilter, setFlagTypeFilter] = useState("none");
+  const selectedCardRef = useRef(null);
   const [sheetExcluded, setSheetExcluded] = useState(()=>new Set(DEFAULT_EXCLUDED_CATEGORIES));
 
   const user = HARDCODED_USER;
@@ -1530,6 +1554,35 @@ export default function App() {
     return m;
   },[allData]);
 
+  // Flag type filter definitions (used in sidebar dropdown + product filtering)
+  const FLAG_FILTER_OPTIONS = [
+    { id:"none",       label:"No flag filter" },
+    { id:"any",        label:"▲ Any flag" },
+    { id:"price_zero", label:"▲ Missing price" },
+    { id:"tier_order", label:"▲ Tier order" },
+    { id:"qty_ladder", label:"▲ Qty ladder" },
+    { id:"sentinel",   label:"▲ Sentinel mismatch" },
+    { id:"outlier",    label:"▲ Price outlier" },
+    { id:"image",      label:"▲ Missing image" },
+    { id:"category",   label:"▲ Uncategorized" },
+    { id:"variant",    label:"▲ Variant issue" },
+    { id:"sku_dupe",   label:"▲ Duplicate SKU" },
+    { id:"no_qty",     label:"▲ No qty discounts" },
+  ];
+  const FLAG_FILTER_MATCH = {
+    any:        f => true,
+    price_zero: f => f.includes("Missing or zero"),
+    tier_order: f => f.includes("tier order violated"),
+    qty_ladder: f => f.includes("price increases at qty"),
+    sentinel:   f => f.includes("sentinel"),
+    outlier:    f => f.includes("Possible price typo"),
+    image:      f => f.includes("Missing image"),
+    category:   f => f.includes("Uncategorized"),
+    variant:    f => f.includes("variant"),
+    sku_dupe:   f => f.includes("child SKU"),
+    no_qty:     f => f.includes("No quantity discounts"),
+  };
+
   const filtered = useMemo(()=>{
     let list = allProducts;
     const effectiveCat = search?"All":category;
@@ -1543,13 +1596,20 @@ export default function App() {
       );
     }
     if(flagFilter) list=list.filter(p=>flaggedParentIds.has(p.parent_id));
+    if(flagTypeFilter!=="none") {
+      const matchFn = FLAG_FILTER_MATCH[flagTypeFilter];
+      list=list.filter(p=>{
+        const pFlags = flagMap[p.parent_id]||[];
+        return pFlags.some(matchFn);
+      });
+    }
     return [...list].sort((a,b)=>{
       if(sortBy==="name") return a.parent_name.localeCompare(b.parent_name);
       if(sortBy==="sku")  return a.parent_sku.localeCompare(b.parent_sku);
       if(sortBy==="cat")  return a.category.localeCompare(b.category);
       return 0;
     });
-  },[allProducts,childSkuMap,category,search,sortBy,flagFilter,flaggedParentIds]);
+  },[allProducts,childSkuMap,category,search,sortBy,flagFilter,flagTypeFilter,flaggedParentIds,flagMap]);
 
   useEffect(()=>{
     if(search&&filtered.length===1){
@@ -1559,6 +1619,13 @@ export default function App() {
       setFocusChildSku(matchingSku||null);
     } else if(!search){ setFocusChildSku(null); }
   },[search,filtered]);
+
+  // Scroll selected card into view when selection changes
+  useEffect(()=>{
+    if(selectedCardRef.current){
+      selectedCardRef.current.scrollIntoView({behavior:"smooth",block:"nearest"});
+    }
+  },[selectedProd]);
 
   function getWsPrice(pid) {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
@@ -1612,11 +1679,6 @@ export default function App() {
           {caps.canViewCustomers && (
             <button className={`nav-btn ${view==="customer"?"active":""}`} onClick={()=>setView("customer")}>👤 Customer View</button>
           )}
-          <button className={`nav-btn ${view==="flags"?"active":""}`}
-            style={view==="flags"?{color:"var(--err)",background:"var(--err-bg)",border:"1px solid rgba(201,64,64,.25)"}:{color:"var(--err)"}}
-            onClick={()=>setView("flags")}>
-            ▲ Flags {totalFlaggedCount>0&&<span style={{fontFamily:"var(--fm)",fontSize:9,background:"var(--err)",color:"#fff",padding:"0px 5px",borderRadius:20,marginLeft:3}}>{totalFlaggedCount}</span>}
-          </button>
         </nav>
         <div className="topbar-end">
           {caps.canSync && (
@@ -1720,12 +1782,23 @@ export default function App() {
                 </div>
                 <div className="sb-sec">
                   <div className="sb-lbl">Data Quality</div>
-                  <button className={`cat-btn ${flagFilter?"on":""}`}
-                    style={flagFilter?{background:"var(--err-bg)",color:"var(--err)"}:{color:"var(--err)"}}
-                    onClick={()=>{setFlagFilter(f=>!f);setSelectedProd(null);}}>
-                    ▲ Flagged only
-                    {totalFlaggedCount>0&&<span className="cat-cnt" style={{color:"var(--err)"}}>{totalFlaggedCount}</span>}
-                  </button>
+                  <select className="sel"
+                    value={flagTypeFilter}
+                    onChange={e=>{ setFlagTypeFilter(e.target.value); setSelectedProd(null); }}
+                    style={flagTypeFilter!=="none"?{borderColor:"var(--err)",color:"var(--err)",background:"var(--err-bg)"}:{}}>
+                    {FLAG_FILTER_OPTIONS.map(o=>(
+                      <option key={o.id} value={o.id}>{o.label}</option>
+                    ))}
+                  </select>
+                  {flagTypeFilter!=="none" && (
+                    <div style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",marginTop:5}}>
+                      {filtered.length} product{filtered.length!==1?"s":""} · {
+                        flagTypeFilter==="any"
+                          ? `${totalFlaggedCount} total flagged`
+                          : FLAG_FILTER_OPTIONS.find(o=>o.id===flagTypeFilter)?.label.replace("▲ ","")
+                      }
+                    </div>
+                  )}
                 </div>
                 <div className="sb-sec" style={{flex:1}}>
                   <div className="sb-lbl">Tiers</div>
@@ -1755,7 +1828,9 @@ export default function App() {
                   const isSimple=vars.length===1&&vars[0].variant_name==="Simple";
                   const myFlagCount=(flagMap[p.parent_id]||[]).length;
                   return (
-                    <div key={p.parent_id} className={`pcard ${selectedProd?.parent_id===p.parent_id?"on":""}`}
+                    <div key={p.parent_id}
+                      ref={selectedProd?.parent_id===p.parent_id ? selectedCardRef : null}
+                      className={`pcard ${selectedProd?.parent_id===p.parent_id?"on":""}`}
                       onClick={()=>setSelectedProd(p)}>
                       {showImages&&(
                         <div className="pcard-img-wrap">
@@ -1809,15 +1884,6 @@ export default function App() {
 
           {view==="customer" && caps.canViewCustomers && (
             <CustomerView allData={allData} caps={caps}/>
-          )}
-
-          {view==="flags" && (
-            <FlagsView allData={allData} onSelectProduct={p=>{
-              setView("browse");
-              setSelectedProd(p);
-              setSearch("");
-              setCategory("All");
-            }}/>
           )}
         </div>
       </div>
