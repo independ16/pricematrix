@@ -293,6 +293,9 @@ function computeRedFlags(data) {
 
     // Flag 8: Statistical outlier — price deviates >40% from median within product+tier qty ladder
     childIds.forEach(childId => {
+      const variantLabel = childIds.length > 1
+        ? (() => { const r = rows.find(rr=>rr.child_id===childId); return r ? ` [${decodeEntities(r.variant_name)||r.child_sku}]` : ""; })()
+        : "";
       TIERS.forEach(tier => {
         const priceRows = rows.filter(r => r.child_id===childId && r.tier===tier && r.qty_break!==1 && r.price!=null && r.price > 0);
         if (priceRows.length < 3) return;
@@ -302,7 +305,7 @@ function computeRedFlags(data) {
         priceRows.forEach(r => {
           const dev = Math.abs(r.price - median) / median;
           if (dev > 0.40) {
-            addFlag(parentId, `Possible price typo: ${tier} qty_break=${r.qty_break} = ${fmt(r.price)} (median ${fmt(median)}, ${(dev*100).toFixed(0)}% off)`);
+            addFlag(parentId, `Possible price typo${variantLabel}: ${tier} qty ${r.qty_break} = ${fmt(r.price)} (median ${fmt(median)}, ${(dev*100).toFixed(0)}% off)`);
           }
         });
       });
@@ -316,13 +319,16 @@ function computeRedFlags(data) {
 
     // Flag 10: Price does not decrease as qty increases (within same tier+child)
     childIds.forEach(childId => {
+      const variantLabel = childIds.length > 1
+        ? (() => { const r = rows.find(rr=>rr.child_id===childId); return r ? ` [${decodeEntities(r.variant_name)||r.child_sku}]` : ""; })()
+        : "";
       TIERS.forEach(tier => {
         const priceRows = rows
           .filter(r=>r.child_id===childId && r.tier===tier && r.qty_break!==1 && r.price!=null)
           .sort((a,b)=>a.qty_break-b.qty_break);
         for (let i=1; i<priceRows.length; i++) {
           if (priceRows[i].price > priceRows[i-1].price) {
-            addFlag(parentId, `${tier}: price increases at qty ${priceRows[i].qty_break} vs ${priceRows[i-1].qty_break}`);
+            addFlag(parentId, `${tier}${variantLabel}: price increases at qty ${priceRows[i].qty_break} vs ${priceRows[i-1].qty_break}`);
             break;
           }
         }
@@ -614,8 +620,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .body,.main{display:block!important;height:auto!important;overflow:visible!important}
   .detail{width:100%!important;border:none!important}
   .grid{display:none!important}
-  body{background:#fff!important;color:#000!important;font-size:10px;margin-bottom:16mm}
-  @page{margin-bottom:18mm}
+  body{background:#fff!important;color:#000!important;font-size:10px}
+  @page{size:landscape;margin:12mm 10mm 22mm 10mm}
   .pt th,.pt td{border-color:#ddd!important}
   .pc-ws,.pc-above,.pc-below,.pc-qty{color:#000!important}
   .pct{display:none!important}
@@ -628,13 +634,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .print-only{display:block!important}
   /* Product detail: keep each variant block together */
   .ptw,.msec{page-break-inside:avoid!important}
-  /* Footer watermark on every page via fixed positioning */
+  /* Footer watermark — fixed to bottom of every page, stays within bottom margin */
   body::after{
     content:"CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute";
-    position:fixed;bottom:8mm;left:0;right:0;
-    text-align:center;font-size:7pt;color:#aaa;
+    position:fixed;bottom:0;left:0;right:0;
+    height:16mm;display:flex;align-items:center;justify-content:center;
+    text-align:center;font-size:7pt;color:#bbb;
     font-family:'DM Mono',monospace;letter-spacing:.03em;
-    border-top:1px solid #e0e0e0;padding-top:3mm;
+    border-top:1px solid #e8e8e8;
   }
 }
 .print-only{display:none}
@@ -1490,6 +1497,71 @@ function _FlagsView_REMOVED({ allData, onSelectProduct }) {
   );
 }
 
+// ─── FLAG INFO TOOLTIP ────────────────────────────────────────────────────────
+const FLAG_DESCRIPTIONS = [
+  { id:"price_zero",  label:"Missing price",       desc:"Wholesale, Wholesale_L2, or Wholesale_L3 base price (qty 0) is zero or absent. These are the reference tiers — a zero here likely means the data was never populated in the sheet." },
+  { id:"tier_order",  label:"Tier order",           desc:"Prices must follow Retail > Commercial > Wholesale at the base qty break. If a lower tier costs more than a higher tier, something was entered incorrectly." },
+  { id:"qty_ladder",  label:"Qty ladder",           desc:"Price should decrease (or stay flat) as quantity increases. A price that goes up at a higher qty break is almost always a data entry error." },
+  { id:"sentinel",    label:"Sentinel mismatch",    desc:"qty_break=0 and qty_break=1 are meant to be identical duplicates (sentinel rows). If they differ for the same variant+tier, the sheet has inconsistent data for that row." },
+  { id:"outlier",     label:"Price outlier",        desc:"A price deviates more than 40% from the median of other qty breaks for the same variant+tier. Calculated as: |price − median| / median. Flags likely typos (e.g. $12 instead of $120)." },
+  { id:"image",       label:"Missing image",        desc:"The image_url column is blank for this product. Product cards and the detail panel will show a placeholder instead of a photo." },
+  { id:"category",    label:"Uncategorized",        desc:'The category field is blank or set to "Uncategorized". Products without a category are excluded from Sheet View by default and may be missed in exports.' },
+  { id:"variant",     label:"Variant issue",        desc:"Either: (a) a variable product has only one variant, which suggests the WooCommerce sync didn't attach sibling variants, or (b) a variant name is blank on a multi-variant product." },
+  { id:"sku_dupe",    label:"Duplicate SKU",        desc:"The same child SKU appears under more than one parent product. Since pricing is keyed by child_id (not SKU), this won't break lookups, but it indicates a data integrity problem in the source catalog." },
+  { id:"no_qty",      label:"No qty discounts",     desc:"The product has only a base price (qty_break=0) and no quantity break tiers. This may be intentional for some products, but warrants review if quantity pricing is expected." },
+];
+
+function FlagInfoTooltip() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(()=>{
+    function handler(e){ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", handler);
+    return ()=>document.removeEventListener("mousedown", handler);
+  },[]);
+
+  return (
+    <div ref={ref} style={{position:"relative",display:"inline-flex"}}>
+      <button
+        onClick={()=>setOpen(o=>!o)}
+        style={{
+          width:15,height:15,borderRadius:"50%",border:"1px solid var(--b3)",
+          background:"var(--s3)",color:"var(--t3)",fontSize:9,fontFamily:"var(--fm)",
+          cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
+          lineHeight:1,flexShrink:0,
+        }}
+        title="Flag definitions">
+        ?
+      </button>
+      {open && (
+        <div style={{
+          position:"absolute",left:"calc(100% + 8px)",top:0,zIndex:500,
+          width:280,background:"var(--s1)",border:"1px solid var(--b2)",
+          borderRadius:8,boxShadow:"var(--shadow)",overflow:"hidden",
+        }}>
+          <div style={{padding:"8px 10px",borderBottom:"1px solid var(--b1)",
+            fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>
+            Flag definitions
+          </div>
+          <div style={{maxHeight:360,overflowY:"auto"}}>
+            {FLAG_DESCRIPTIONS.map(f=>(
+              <div key={f.id} style={{padding:"7px 10px",borderBottom:"1px solid var(--b1)"}}>
+                <div style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--err)",marginBottom:3,fontWeight:500}}>
+                  ▲ {f.label}
+                </div>
+                <div style={{fontSize:11,color:"var(--t2)",lineHeight:1.5,fontFamily:"var(--fb)"}}>
+                  {f.desc}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [dark,         setDark]         = useState(false);
@@ -1781,7 +1853,10 @@ export default function App() {
                   </select>
                 </div>
                 <div className="sb-sec">
-                  <div className="sb-lbl">Data Quality</div>
+                  <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:6}}>
+                    <div className="sb-lbl" style={{marginBottom:0}}>Data Quality</div>
+                    <FlagInfoTooltip/>
+                  </div>
                   <select className="sel"
                     value={flagTypeFilter}
                     onChange={e=>{ setFlagTypeFilter(e.target.value); setSelectedProd(null); }}
