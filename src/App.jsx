@@ -235,12 +235,16 @@ function computeRedFlags(data) {
     const tierChildCombos = new Map();
     rows.forEach(r => {
       const key = `${r.child_id}__${r.tier}`;
-      (tierChildCombos.get(key) || tierChildCombos.set(key,{}).get(key))[r.qty_break] = r.price;
+      if (!tierChildCombos.has(key)) tierChildCombos.set(key, { variantName: decodeEntities(r.variant_name), childId: r.child_id });
+      const entry = tierChildCombos.get(key);
+      entry[r.qty_break] = r.price;
     });
-    tierChildCombos.forEach((prices, key) => {
-      if (prices[0] != null && prices[1] != null && prices[0] !== prices[1]) {
+    tierChildCombos.forEach((entry, key) => {
+      if (entry[0] != null && entry[1] != null && entry[0] !== entry[1]) {
         const tier = key.split("__")[1];
-        addFlag(parentId, `qty_break 0 ≠ qty_break 1 (${tier}) — sentinel mismatch`);
+        const variantLabel = childIds.length > 1 && entry.variantName && entry.variantName !== "Simple"
+          ? ` [${entry.variantName}]` : "";
+        addFlag(parentId, `qty_break 0 ≠ qty_break 1${variantLabel} (${tier}) — sentinel mismatch`);
       }
     });
 
@@ -621,7 +625,15 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .detail{width:100%!important;border:none!important}
   .grid{display:none!important}
   body{background:#fff!important;color:#000!important;font-size:10px}
-  @page{size:landscape;margin:12mm 10mm 22mm 10mm}
+  @page{
+    size:landscape;
+    margin:12mm 10mm 20mm 10mm;
+    @bottom-center{
+      content:"CONFIDENTIAL — Property of Patio Products, Inc.  ·  Internal use only  ·  Do not distribute";
+      font-size:6.5pt;color:#bbb;font-family:'DM Mono',monospace;letter-spacing:.03em;
+      border-top:0.5pt solid #ddd;padding-top:2mm;
+    }
+  }
   .pt th,.pt td{border-color:#ddd!important}
   .pc-ws,.pc-above,.pc-below,.pc-qty{color:#000!important}
   .pct{display:none!important}
@@ -632,17 +644,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .sheet{display:block!important;height:auto!important}
   .sheet-wrap{display:none!important}
   .print-only{display:block!important}
-  /* Product detail: keep each variant block together */
   .ptw,.msec{page-break-inside:avoid!important}
-  /* Footer watermark — fixed to bottom of every page, stays within bottom margin */
-  body::after{
-    content:"CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute";
-    position:fixed;bottom:0;left:0;right:0;
-    height:16mm;display:flex;align-items:center;justify-content:center;
-    text-align:center;font-size:7pt;color:#bbb;
-    font-family:'DM Mono',monospace;letter-spacing:.03em;
-    border-top:1px solid #e8e8e8;
-  }
 }
 .print-only{display:none}
 .print-hdr{display:none;padding:0 0 14px 0}
@@ -1513,18 +1515,33 @@ const FLAG_DESCRIPTIONS = [
 
 function FlagInfoTooltip() {
   const [open, setOpen] = useState(false);
-  const ref = useRef(null);
+  const [pos,  setPos]  = useState({top:0, left:0});
+  const btnRef = useRef(null);
+  const popRef = useRef(null);
 
   useEffect(()=>{
-    function handler(e){ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function handler(e){
+      if(btnRef.current && btnRef.current.contains(e.target)) return;
+      if(popRef.current && popRef.current.contains(e.target)) return;
+      setOpen(false);
+    }
     document.addEventListener("mousedown", handler);
     return ()=>document.removeEventListener("mousedown", handler);
   },[]);
 
+  function handleOpen() {
+    if (!open && btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect();
+      setPos({ top: r.top, left: r.right + 8 });
+    }
+    setOpen(o=>!o);
+  }
+
   return (
-    <div ref={ref} style={{position:"relative",display:"inline-flex"}}>
+    <>
       <button
-        onClick={()=>setOpen(o=>!o)}
+        ref={btnRef}
+        onClick={handleOpen}
         style={{
           width:15,height:15,borderRadius:"50%",border:"1px solid var(--b3)",
           background:"var(--s3)",color:"var(--t3)",fontSize:9,fontFamily:"var(--fm)",
@@ -1535,16 +1552,17 @@ function FlagInfoTooltip() {
         ?
       </button>
       {open && (
-        <div style={{
-          position:"absolute",left:"calc(100% + 8px)",top:0,zIndex:500,
-          width:280,background:"var(--s1)",border:"1px solid var(--b2)",
-          borderRadius:8,boxShadow:"var(--shadow)",overflow:"hidden",
+        <div ref={popRef} style={{
+          position:"fixed", top:pos.top, left:pos.left, zIndex:9999,
+          width:290, background:"var(--s1)", border:"1px solid var(--b2)",
+          borderRadius:8, boxShadow:"0 4px 24px rgba(0,0,0,.18)", overflow:"hidden",
+          maxHeight:"min(420px, 80vh)",
         }}>
           <div style={{padding:"8px 10px",borderBottom:"1px solid var(--b1)",
             fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>
             Flag definitions
           </div>
-          <div style={{maxHeight:360,overflowY:"auto"}}>
+          <div style={{overflowY:"auto", maxHeight:"calc(min(420px,80vh) - 32px)"}}>
             {FLAG_DESCRIPTIONS.map(f=>(
               <div key={f.id} style={{padding:"7px 10px",borderBottom:"1px solid var(--b1)"}}>
                 <div style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--err)",marginBottom:3,fontWeight:500}}>
@@ -1558,7 +1576,7 @@ function FlagInfoTooltip() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
