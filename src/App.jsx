@@ -427,6 +427,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .nav-btn:hover{color:var(--t2);background:var(--s3)}
 .nav-btn.active{background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.25)}
 .topbar-end{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.data-stats{display:flex;align-items:center;gap:10px;padding:4px 11px;border-radius:20px;background:var(--s3);border:1px solid var(--b2);font-family:var(--fm);font-size:10px;color:var(--t3);white-space:nowrap;flex-shrink:0;}
+.data-stats .ds-val{color:var(--text);font-weight:500;}
+.data-stats .ds-sep{opacity:.4;}
+.data-stats.aging .ds-date{color:#b87020;}
+.data-stats.stale .ds-date{color:#c94040;}
 .theme-btn{width:32px;height:32px;border-radius:6px;border:1px solid var(--b2);background:var(--s3);color:var(--t2);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;}
 .theme-btn:hover{background:var(--s4);color:var(--text)}
 
@@ -1634,6 +1639,20 @@ export default function App() {
 
   const allProducts = useMemo(()=>getProducts(allData),[allData]);
 
+  // ── DATA STATS (row count + freshness) ──
+  const dataStats = useMemo(() => {
+    if (!allData.length) return null;
+    const variantCount = allData.length;
+    const timestamps = allData
+      .map(r => r.last_updated ? new Date(r.last_updated).getTime() : 0)
+      .filter(t => t > 0);
+    const lastUpdated = timestamps.length ? new Date(Math.max(...timestamps)) : null;
+    const ageMs = lastUpdated ? Date.now() - lastUpdated.getTime() : null;
+    const stale = ageMs !== null && ageMs > 48 * 3600 * 1000;
+    const aging = ageMs !== null && ageMs > 24 * 3600 * 1000;
+    return { variantCount, lastUpdated, stale, aging };
+  }, [allData]);
+
   const allCategories = useMemo(()=>{
     const s = new Set();
     allData.forEach(r=>{ if(r.category) s.add(decodeEntities(r.category)); });
@@ -1778,6 +1797,20 @@ export default function App() {
             <button className={`nav-btn ${view==="customer"?"active":""}`} onClick={()=>setView("customer")}>👤 Customer View</button>
           )}
         </nav>
+        {dataStats && (() => {
+          const fmt = new Intl.DateTimeFormat("en-US", {month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"});
+          const staleCls = dataStats.stale ? " stale" : dataStats.aging ? " aging" : "";
+          return (
+            <div className={`data-stats no-print${staleCls}`}
+              title={dataStats.lastUpdated ? `Last updated: ${fmt.format(dataStats.lastUpdated)}` : ""}>
+              <span><span className="ds-val">{dataStats.variantCount.toLocaleString()}</span> variants</span>
+              {dataStats.lastUpdated && <>
+                <span className="ds-sep"> · </span>
+                <span className="ds-date">Updated <span className="ds-val">{fmt.format(dataStats.lastUpdated)}</span></span>
+              </>}
+            </div>
+          );
+        })()}
         <div className="topbar-end">
           {caps.canSync && (
             <button className="btn no-print"
