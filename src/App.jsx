@@ -13,15 +13,57 @@ const TIER_COLORS = {
   OEM:          "#888888",
 };
 
-// ─── AUTH BYPASS — hardcoded admin for production while Supabase migration is in progress ───
-// To restore auth: remove HARDCODED_USER and re-add the GoTrue/Supabase auth gate
-const HARDCODED_USER = {
-  id:   "local-admin",
-  email: "admin@patioproducts.com",
-  name:  "Admin",
-  role:  "admin",
-  accessToken: null,
-};
+// ─── SUPABASE AUTH ────────────────────────────────────────────────────────────
+const SUPABASE_URL      = "https://yhtztcldtliugjaizrdyzu.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_xX28c-55YlYaFN1uGHvsPg__rKtBihm";
+
+// Helpers — call Supabase REST auth endpoints directly (no SDK)
+async function sbSignIn(email, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+    body:    JSON.stringify({ email, password }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "Sign-in failed");
+  return data; // { access_token, refresh_token, expires_in, ... }
+}
+
+async function sbRefresh(refreshToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+    body:    JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "Token refresh failed");
+  return data;
+}
+
+async function sbSendPasswordReset(email) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+    body:    JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error_description || data.msg || "Reset request failed");
+  }
+}
+
+// Persist session to localStorage
+function saveSession(session) {
+  localStorage.setItem("pm_session", JSON.stringify({
+    access_token:  session.access_token,
+    refresh_token: session.refresh_token,
+    expires_at:    Date.now() + (session.expires_in || 3600) * 1000,
+  }));
+}
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem("pm_session") || "null"); } catch { return null; }
+}
+function clearSession() { localStorage.removeItem("pm_session"); }
 
 // ─── CATEGORIES TO EXCLUDE FROM SHEET VIEW / PRINT BY DEFAULT ────────────────
 // Edit this list to control which categories are hidden from Sheet View.
@@ -685,7 +727,57 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .print-cust-hdr{display:none;padding:0 0 18px 0}
 .print-cust-hdr h1{font-family:'Syne',sans-serif;font-size:20px;color:#000;margin-bottom:4px}
 .print-cust-hdr p{font-size:12px;color:#666;font-family:'DM Sans',sans-serif}
+
+/* ── AUTH GATE ── */
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:24px;}
+.auth-card{background:var(--s1);border:1px solid var(--b1);border-radius:14px;padding:40px 36px;width:100%;max-width:380px;box-shadow:var(--shadow);display:flex;flex-direction:column;align-items:center;gap:0;}
+.auth-logo{width:56px;height:56px;border-radius:12px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--brand);margin-bottom:18px;flex-shrink:0;}
+.auth-logo img{width:56px;height:56px;object-fit:contain;mix-blend-mode:multiply;}
+.dark .auth-logo img{mix-blend-mode:normal;opacity:.85;}
+.auth-logo-fallback{font-family:var(--fd);font-weight:800;font-size:22px;color:#fff;}
+.auth-title{font-family:var(--fd);font-weight:700;font-size:22px;color:var(--text);margin-bottom:4px;text-align:center;}
+.auth-sub{font-size:12px;color:var(--t3);margin-bottom:28px;text-align:center;}
+.auth-form{width:100%;display:flex;flex-direction:column;gap:12px;}
+.auth-field{display:flex;flex-direction:column;gap:5px;}
+.auth-label{font-family:var(--fm);font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;}
+.auth-inp{width:100%;padding:10px 13px;background:var(--s2);border:1px solid var(--b1);border-radius:7px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;transition:border-color .2s;}
+.auth-inp:focus{border-color:var(--brand);}
+.auth-inp::placeholder{color:var(--t4);}
+.auth-err{font-size:11px;color:var(--err);background:var(--err-bg);border:1px solid rgba(201,64,64,.2);border-radius:6px;padding:8px 11px;text-align:center;}
+.auth-btn{width:100%;padding:11px;background:var(--brand);border:none;border-radius:7px;color:#fff;font-family:var(--fb);font-size:13px;font-weight:600;cursor:pointer;transition:background .15s;margin-top:4px;}
+.auth-btn:hover{background:var(--brand-lt);}
+.auth-btn:disabled{opacity:.6;cursor:not-allowed;}
+.auth-link{font-size:11px;color:var(--brand);background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px;}
+.auth-link:hover{color:var(--brand-lt);}
+.auth-forgot{width:100%;text-align:right;margin-top:-4px;}
+.auth-reset-msg{font-size:11px;color:var(--below);background:var(--below-bg);border:1px solid rgba(45,122,90,.2);border-radius:6px;padding:8px 11px;text-align:center;width:100%;}
+
+/* ── USER MANAGEMENT MODAL ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:1000;padding:24px;}
+.modal{background:var(--s1);border:1px solid var(--b1);border-radius:14px;width:100%;max-width:440px;box-shadow:0 8px 40px rgba(0,0,0,.18);display:flex;flex-direction:column;max-height:90vh;overflow:hidden;}
+.modal-hdr{padding:18px 20px;border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+.modal-title{font-family:var(--fd);font-weight:700;font-size:15px;color:var(--text);}
+.modal-body{padding:20px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;}
+.modal-field{display:flex;flex-direction:column;gap:5px;}
+.modal-label{font-family:var(--fm);font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;}
+.modal-inp{width:100%;padding:9px 12px;background:var(--s2);border:1px solid var(--b1);border-radius:7px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;transition:border-color .2s;}
+.modal-inp:focus{border-color:var(--brand);}
+.modal-sel{width:100%;padding:9px 12px;background:var(--s2);border:1px solid var(--b1);border-radius:7px;color:var(--text);font-family:var(--fb);font-size:13px;outline:none;cursor:pointer;}
+.modal-sel option{background:var(--s2);}
+.modal-footer{padding:14px 20px;border-top:1px solid var(--b1);display:flex;gap:8px;justify-content:flex-end;flex-shrink:0;}
+.user-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:7px;background:var(--s2);border:1px solid var(--b1);}
+.user-row-info{flex:1;min-width:0;}
+.user-row-name{font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.user-row-email{font-family:var(--fm);font-size:10px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.user-role-badge{font-family:var(--fm);font-size:9px;padding:2px 7px;border-radius:20px;flex-shrink:0;background:var(--brand-dim);color:var(--brand);border:1px solid rgba(72,147,103,.25);}
+.user-mgmt-btn{font-family:var(--fm);font-size:9px;cursor:pointer;border-radius:4px;padding:3px 8px;transition:all .15s;background:transparent;border:1px solid var(--b2);color:var(--t3);}
+.user-mgmt-btn:hover{color:var(--text);background:var(--s3);}
+.user-mgmt-btn.danger{border-color:rgba(201,64,64,.3);color:var(--err);}
+.user-mgmt-btn.danger:hover{background:var(--err-bg);}
+.user-acct-btn{background:none;border:none;cursor:pointer;display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;color:var(--t2);font-size:12px;font-family:var(--fb);transition:all .15s;}
+.user-acct-btn:hover{background:var(--s3);color:var(--text);}
 `;
+
 
 // ─── LOGO ─────────────────────────────────────────────────────────────────────
 const LOGO_URL = "https://www.patioproducts.com/wp-content/uploads/2025/03/logo-3.png";
@@ -698,6 +790,295 @@ function LogoImg({ size=30, className="logo" }) {
         ? <img src={LOGO_URL} alt="Patio Products" onError={()=>setErr(true)}/>
         : <span className={className==="auth-logo"?"auth-logo-fallback":"logo-fallback"}>W</span>
       }
+    </div>
+  );
+}
+
+// ─── AUTH GATE ────────────────────────────────────────────────────────────────
+function AuthGate({ dark, onAuth }) {
+  const [email,      setEmail]      = useState("");
+  const [password,   setPassword]   = useState("");
+  const [error,      setError]      = useState("");
+  const [loading,    setLoading]    = useState(false);
+  const [resetMode,  setResetMode]  = useState(false);
+  const [resetSent,  setResetSent]  = useState(false);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setError(""); setLoading(true);
+    try {
+      const session = await sbSignIn(email.trim(), password);
+      saveSession(session);
+      // Fetch role + name from user_profiles via serverless function
+      const profileRes = await fetch("/.netlify/functions/get-profile", {
+        headers: { "Authorization": `Bearer ${session.access_token}` },
+      });
+      const profile = await profileRes.json();
+      if (!profileRes.ok) throw new Error(profile.error || "Could not load user profile");
+      onAuth({ ...profile, accessToken: session.access_token, refreshToken: session.refresh_token });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleReset(e) {
+    e.preventDefault();
+    if (!email.trim()) { setError("Enter your email address first"); return; }
+    setError(""); setLoading(true);
+    try {
+      await sbSendPasswordReset(email.trim());
+      setResetSent(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className={`app${dark?" dark":""}`}>
+      <style>{CSS}</style>
+      <div className="auth-wrap">
+        <div className="auth-card">
+          <LogoImg size={56} className="auth-logo"/>
+          <div className="auth-title">PriceMatrix</div>
+          <div className="auth-sub">Patio Products, Inc. · Internal pricing tool</div>
+
+          {resetMode ? (
+            resetSent ? (
+              <>
+                <div className="auth-reset-msg" style={{marginBottom:16}}>
+                  ✓ Password reset email sent to {email}.<br/>Check your inbox and follow the link.
+                </div>
+                <button className="auth-link" onClick={()=>{setResetMode(false);setResetSent(false);}}>
+                  Back to sign in
+                </button>
+              </>
+            ) : (
+              <form className="auth-form" onSubmit={handleReset}>
+                {error && <div className="auth-err">{error}</div>}
+                <div className="auth-field">
+                  <label className="auth-label">Email</label>
+                  <input className="auth-inp" type="email" placeholder="you@patioproducts.com"
+                    value={email} onChange={e=>setEmail(e.target.value)} autoFocus required/>
+                </div>
+                <button className="auth-btn" type="submit" disabled={loading}>
+                  {loading ? "Sending…" : "Send reset email"}
+                </button>
+                <div style={{textAlign:"center",marginTop:4}}>
+                  <button type="button" className="auth-link" onClick={()=>{setResetMode(false);setError("");}}>
+                    Back to sign in
+                  </button>
+                </div>
+              </form>
+            )
+          ) : (
+            <form className="auth-form" onSubmit={handleLogin}>
+              {error && <div className="auth-err">{error}</div>}
+              <div className="auth-field">
+                <label className="auth-label">Email</label>
+                <input className="auth-inp" type="email" placeholder="you@patioproducts.com"
+                  value={email} onChange={e=>setEmail(e.target.value)} autoFocus required/>
+              </div>
+              <div className="auth-field">
+                <label className="auth-label">Password</label>
+                <input className="auth-inp" type="password" placeholder="••••••••"
+                  value={password} onChange={e=>setPassword(e.target.value)} required/>
+              </div>
+              <div className="auth-forgot">
+                <button type="button" className="auth-link"
+                  onClick={()=>{setResetMode(true);setError("");}}>
+                  Forgot password?
+                </button>
+              </div>
+              <button className="auth-btn" type="submit" disabled={loading}>
+                {loading ? "Signing in…" : "Sign in"}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── USER MANAGEMENT MODAL ────────────────────────────────────────────────────
+const MANAGED_USERS_KEY = "pm_managed_users"; // local cache of invited users for display
+
+function UserManagementModal({ onClose, currentUser }) {
+  const [tab,         setTab]        = useState("users"); // "users" | "invite"
+  const [users,       setUsers]      = useState([]);
+  const [loadingUsers,setLoadingUsers]= useState(true);
+  const [invEmail,    setInvEmail]   = useState("");
+  const [invName,     setInvName]    = useState("");
+  const [invRole,     setInvRole]    = useState("viewer");
+  const [invStatus,   setInvStatus]  = useState(""); // "", "sending", "ok", "err"
+  const [invErr,      setInvErr]     = useState("");
+  const [resetTarget, setResetTarget]= useState(null); // email being reset
+  const [resetStatus, setResetStatus]= useState(""); // "" | "sending" | "ok" | "err"
+
+  // Load cached user list from localStorage (we don't have a list endpoint
+  // without exposing the service role key to the client, so we maintain a
+  // local cache of who admin has invited/confirmed)
+  useEffect(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(MANAGED_USERS_KEY) || "[]");
+      setUsers(cached);
+    } catch {}
+    setLoadingUsers(false);
+  }, []);
+
+  function saveUsers(list) {
+    setUsers(list);
+    localStorage.setItem(MANAGED_USERS_KEY, JSON.stringify(list));
+  }
+
+  async function handleInvite(e) {
+    e.preventDefault();
+    setInvStatus("sending"); setInvErr("");
+    try {
+      const res = await fetch("/.netlify/functions/invite-user", {
+        method:  "POST",
+        headers: {
+          "Content-Type":  "application/json",
+          "Authorization": `Bearer ${currentUser.accessToken}`,
+        },
+        body: JSON.stringify({ email: invEmail.trim(), name: invName.trim(), role: invRole }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Invite failed");
+      // Add to local cache
+      const sentTo = invEmail.trim().toLowerCase();
+      const newUser = { email: sentTo, name: invName.trim(), role: invRole };
+      saveUsers([...users.filter(u=>u.email!==newUser.email), newUser]);
+      setInvEmail(""); setInvName(""); setInvRole("viewer");
+      setInvStatus(sentTo); // store email as status so success message can show it
+    } catch (err) {
+      setInvErr(err.message); setInvStatus("err");
+    }
+  }
+
+  async function handleSendReset(email) {
+    setResetTarget(email); setResetStatus("sending");
+    try {
+      await sbSendPasswordReset(email);
+      setResetStatus("ok");
+    } catch {
+      setResetStatus("err");
+    }
+  }
+
+  const ROLE_LABELS = { admin:"Admin", manager:"Manager", viewer:"Viewer" };
+
+  return (
+    <div className="modal-overlay" onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <div className="modal-hdr">
+          <div className="modal-title">👤 User Management</div>
+          <button className="det-close" onClick={onClose}>✕</button>
+        </div>
+
+        {/* Tab bar */}
+        <div style={{display:"flex",borderBottom:"1px solid var(--b1)",padding:"0 20px",gap:2,flexShrink:0}}>
+          {[["users","Users"],["invite","+ Invite User"]].map(([id,label])=>(
+            <button key={id} onClick={()=>{setTab(id);setInvStatus("");}}
+              style={{padding:"9px 14px",background:"none",border:"none",borderBottom:tab===id?"2px solid var(--brand)":"2px solid transparent",
+                color:tab===id?"var(--brand)":"var(--t3)",fontFamily:"var(--fm)",fontSize:11,cursor:"pointer",marginBottom:-1,transition:"all .15s"}}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "users" && (
+          <div className="modal-body">
+            {/* Always show the current admin user */}
+            <div className="user-row">
+              <div className="user-row-info">
+                <div className="user-row-name">{currentUser.name} (you)</div>
+                <div className="user-row-email">{currentUser.email}</div>
+              </div>
+              <span className="user-role-badge">{ROLE_LABELS[currentUser.role]||currentUser.role}</span>
+            </div>
+
+            {loadingUsers ? (
+              <div style={{color:"var(--t3)",fontSize:11,textAlign:"center",padding:"12px 0"}}>Loading…</div>
+            ) : users.length === 0 ? (
+              <div style={{color:"var(--t3)",fontSize:11,textAlign:"center",padding:"12px 0"}}>
+                No invited users yet. Use the Invite tab to add team members.
+              </div>
+            ) : (
+              users.filter(u=>u.email!==currentUser.email).map(u=>(
+                <div key={u.email} className="user-row">
+                  <div className="user-row-info">
+                    <div className="user-row-name">{u.name}</div>
+                    <div className="user-row-email">{u.email}</div>
+                  </div>
+                  <span className="user-role-badge">{ROLE_LABELS[u.role]||u.role}</span>
+                  <div style={{display:"flex",gap:4,flexShrink:0}}>
+                    {resetTarget===u.email ? (
+                      <span style={{fontSize:10,color:resetStatus==="ok"?"var(--below)":resetStatus==="err"?"var(--err)":"var(--t3)",fontFamily:"var(--fm)"}}>
+                        {resetStatus==="sending"?"Sending…":resetStatus==="ok"?"Reset sent ✓":resetStatus==="err"?"Failed":""}
+                      </span>
+                    ) : (
+                      <button className="user-mgmt-btn" title="Send password reset email"
+                        onClick={()=>handleSendReset(u.email)}>
+                        Reset pwd
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+            <div style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)",lineHeight:1.6,marginTop:4}}>
+              To remove a user or change their role, visit the{" "}
+              <a href="https://supabase.com/dashboard/project/yhtztcldtliugjaizrdyzu/auth/users"
+                target="_blank" rel="noopener noreferrer" style={{color:"var(--brand)"}}>
+                Supabase dashboard
+              </a>.
+            </div>
+          </div>
+        )}
+
+        {tab === "invite" && (
+          <form className="modal-body" onSubmit={handleInvite}>
+            {invStatus && invStatus!=="sending" && invStatus!=="err" && (
+              <div className="auth-reset-msg">✓ Invite sent! {invStatus} will receive an email to set their password.</div>
+            )}
+            {invStatus==="err" && (
+              <div className="auth-err">{invErr}</div>
+            )}
+            <div className="modal-field">
+              <label className="modal-label">Full Name</label>
+              <input className="modal-inp" type="text" placeholder="Jane Smith"
+                value={invName} onChange={e=>setInvName(e.target.value)} required/>
+            </div>
+            <div className="modal-field">
+              <label className="modal-label">Email Address</label>
+              <input className="modal-inp" type="email" placeholder="jane@patioproducts.com"
+                value={invEmail} onChange={e=>setInvEmail(e.target.value)} required/>
+            </div>
+            <div className="modal-field">
+              <label className="modal-label">Role</label>
+              <select className="modal-sel" value={invRole} onChange={e=>setInvRole(e.target.value)}>
+                <option value="admin">Admin — full access + user management</option>
+                <option value="manager">Manager — all tiers, export CSV, read customer view</option>
+                <option value="viewer">Viewer — all tiers, sheet view only</option>
+              </select>
+            </div>
+            <div style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)",lineHeight:1.6,background:"var(--s2)",borderRadius:6,padding:"8px 10px",border:"1px solid var(--b1)"}}>
+              Supabase will email {invEmail||"the user"} a magic link to set their password. They will be signed in automatically when they click it.
+            </div>
+            <div className="modal-footer" style={{padding:0,border:"none"}}>
+              <button type="button" className="btn" onClick={onClose}>Cancel</button>
+              <button type="submit" className="btn btn-a" disabled={invStatus==="sending"}>
+                {invStatus==="sending" ? "Sending…" : "Send Invite"}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
     </div>
   );
 }
@@ -1609,21 +1990,56 @@ export default function App() {
   const selectedCardRef = useRef(null);
   const [sheetExcluded, setSheetExcluded] = useState(()=>new Set(DEFAULT_EXCLUDED_CATEGORIES));
 
-  const user = HARDCODED_USER;
-  const caps = getRoleCapabilities(user.role);
+  const [user,        setUser]       = useState(null);  // null = not logged in
+  const [authReady,   setAuthReady]  = useState(false); // true once session restore attempted
+  const [showUserMgmt,setShowUserMgmt] = useState(false);
+
+  const caps = getRoleCapabilities(user?.role);
+
+  // ── Restore session on mount ──────────────────────────────────────────────
+  useEffect(()=>{
+    async function restoreSession() {
+      const session = loadSession();
+      if (!session) { setAuthReady(true); return; }
+      // Refresh token if expired or within 5 min of expiry
+      const needsRefresh = !session.expires_at || Date.now() > session.expires_at - 5 * 60 * 1000;
+      try {
+        let active = session;
+        if (needsRefresh) { active = await sbRefresh(session.refresh_token); saveSession(active); }
+        const profileRes = await fetch("/.netlify/functions/get-profile", {
+          headers: { "Authorization": `Bearer ${active.access_token}` },
+        });
+        const profile = await profileRes.json();
+        if (profileRes.ok) {
+          setUser({ ...profile, accessToken: active.access_token, refreshToken: active.refresh_token });
+        } else { clearSession(); }
+      } catch { clearSession(); }
+      finally  { setAuthReady(true); }
+    }
+    restoreSession();
+  },[]);
 
   const [allData,   setAllData]   = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [loadError, setLoadError] = useState(null);
 
+  function handleSignOut() {
+    clearSession();
+    setUser(null);
+    setAllData([]);
+    setLoading(true);
+    setLoadError(null);
+  }
+
   useEffect(()=>{
+    if (!user) return; // don't fetch until authenticated
     setLoading(true);
     setLoadError(null);
     fetch("/.netlify/functions/sheet-data")
       .then(r=>r.json())
       .then(rows=>{ setAllData(rows); setLoading(false); })
       .catch(err=>{ setLoadError(err.message); setLoading(false); });
-  },[]);
+  },[user]);
 
   // Compute red flags (memoized — expensive)
   const flagMap = useMemo(()=>{
@@ -1748,6 +2164,19 @@ export default function App() {
     return allData.find(r=>r.parent_id===pid&&r.tier==="Wholesale"&&r.qty_break===0)?.price;
   }
 
+  // ── Auth gate: wait for session restore, show login if no user ─────────────
+  if (!authReady) return (
+    <div className={`app${dark?" dark":""}`}>
+      <style>{CSS}</style>
+      <div className="loading-wrap">
+        <LogoImg size={48} className="auth-logo"/>
+        <div className="spinner"/>
+      </div>
+    </div>
+  );
+
+  if (!user) return <AuthGate dark={dark} onAuth={u=>setUser(u)} />;
+
   if (loading) return (
     <div className={`app${dark?" dark":""}`}>
       <style>{CSS}</style>
@@ -1828,8 +2257,26 @@ export default function App() {
             style={!showImages?{color:"var(--t4)"}:{}}>
             ⊟
           </button>
+          {/* User account button */}
+          <div style={{width:1,height:20,background:"var(--b1)",flexShrink:0,marginLeft:2}}/>
+          <button className="user-acct-btn no-print" title={user.email}
+            onClick={()=>{ if(user?.role==="admin") setShowUserMgmt(true); }}>
+            <span style={{width:26,height:26,borderRadius:"50%",background:"var(--brand-dim)",border:"1px solid rgba(72,147,103,.3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"var(--brand)",fontWeight:600,flexShrink:0}}>
+              {(user.name||user.email)[0].toUpperCase()}
+            </span>
+            <span style={{fontSize:11,color:"var(--t2)",maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {user.name||user.email}
+            </span>
+          </button>
+          <button className="btn no-print" style={{fontSize:11,color:"var(--t3)"}}
+            onClick={handleSignOut} title="Sign out">
+            Sign out
+          </button>
         </div>
       </header>
+      {showUserMgmt && user?.role === "admin" && (
+        <UserManagementModal currentUser={user} onClose={()=>setShowUserMgmt(false)}/>
+      )}
 
       <div className="body">
         {showSidebar && (
