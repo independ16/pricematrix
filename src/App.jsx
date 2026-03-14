@@ -14,14 +14,14 @@ const TIER_COLORS = {
 };
 
 // ─── SUPABASE AUTH ────────────────────────────────────────────────────────────
-const SUPABASE_URL      = "https://yhtztcldtliugjaizrdyzu.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_xX28c-55YlYaFN1uGHvsPg__rKtBihm";
+const SB_URL      = "https://yhtztcldtliugjaizrdyzu.supabase.co";
+const SB_ANON_KEY = "sb_publishable_xX28c-55YlYaFN1uGHvsPg__rKtBihm";
 
 // Helpers — call Supabase REST auth endpoints directly (no SDK)
 async function sbSignIn(email, password) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+  const res = await fetch(`${SB_URL}/auth/v1/token?grant_type=password`, {
     method:  "POST",
-    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+    headers: { "Content-Type": "application/json", "apikey": SB_ANON_KEY },
     body:    JSON.stringify({ email, password }),
   });
   const data = await res.json();
@@ -30,9 +30,9 @@ async function sbSignIn(email, password) {
 }
 
 async function sbRefresh(refreshToken) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+  const res = await fetch(`${SB_URL}/auth/v1/token?grant_type=refresh_token`, {
     method:  "POST",
-    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+    headers: { "Content-Type": "application/json", "apikey": SB_ANON_KEY },
     body:    JSON.stringify({ refresh_token: refreshToken }),
   });
   const data = await res.json();
@@ -41,9 +41,9 @@ async function sbRefresh(refreshToken) {
 }
 
 async function sbSendPasswordReset(email) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+  const res = await fetch(`${SB_URL}/auth/v1/recover`, {
     method:  "POST",
-    headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+    headers: { "Content-Type": "application/json", "apikey": SB_ANON_KEY },
     body:    JSON.stringify({ email }),
   });
   if (!res.ok) {
