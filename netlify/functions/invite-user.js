@@ -132,7 +132,7 @@ exports.handler = async function(event) {
   // Supabase Admin invite API sends a magic-link email so the user can set
   // their own password.  We embed name + role in user_metadata so they're
   // available immediately; we also write them to user_profiles below.
-  const inviteRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/invite`, {
+  const inviteRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
     method:  "POST",
     headers: {
       "Content-Type":  "application/json",
@@ -142,6 +142,7 @@ exports.handler = async function(event) {
     body: JSON.stringify({
       email,
       data: { name, role },   // user_metadata — available on the client immediately after invite
+      invite: true,           // tells Supabase to send a magic-link invite email
     }),
   });
 
