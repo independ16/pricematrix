@@ -20,6 +20,11 @@
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// The anon key is safe to hardcode here — it's already public in the frontend.
+// It is required for the /auth/v1/user endpoint (which validates user JWTs),
+// which rejects the service role key in the apikey header.
+const SUPABASE_ANON_KEY = "sb_publishable_H3M7RiA4omp-KvMy2s3plg_ce4wO0BV";
+
 const ALLOWED_ROLES = ["admin", "manager", "viewer"];
 
 const headers = {
@@ -28,6 +33,10 @@ const headers = {
 };
 
 exports.handler = async function(event) {
+  // ── Diagnostic: log env var state on every invocation ──────────────────────
+  console.log("invite-user: SUPABASE_URL present:", !!SUPABASE_URL, "| starts with https:", SUPABASE_URL?.startsWith("https"));
+  console.log("invite-user: SUPABASE_SERVICE_KEY present:", !!SUPABASE_SERVICE_KEY, "| length:", SUPABASE_SERVICE_KEY?.length);
+
   // ── CORS preflight ──────────────────────────────────────────────────────────
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: { ...headers, "Access-Control-Allow-Headers": "Authorization,Content-Type", "Access-Control-Allow-Methods": "POST,OPTIONS" }, body: "" };
@@ -35,6 +44,12 @@ exports.handler = async function(event) {
 
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, headers, body: JSON.stringify({ error: "Method not allowed" }) };
+  }
+
+  // Guard: if env vars missing, fail fast with a clear error instead of a cryptic crash
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    console.error("invite-user: missing env vars — SUPABASE_URL:", SUPABASE_URL, "| SUPABASE_SERVICE_ROLE_KEY present:", !!SUPABASE_SERVICE_KEY);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "Server misconfiguration: missing Supabase env vars" }) };
   }
 
   // ── Verify caller is an authenticated admin ─────────────────────────────────
@@ -45,15 +60,19 @@ exports.handler = async function(event) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Missing Authorization header" }) };
   }
 
-  // Get caller's user record from Supabase using their access token
+  // Get caller's user record from Supabase using their access token.
+  // Must use the ANON key here — the /auth/v1/user endpoint validates user JWTs
+  // and requires the anon key, not the service role key.
   const callerRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
     headers: {
       "Authorization": `Bearer ${callerToken}`,
-      "apikey": SUPABASE_SERVICE_KEY,
+      "apikey": SUPABASE_ANON_KEY,
     },
   });
 
   if (!callerRes.ok) {
+    const errText = await callerRes.text();
+    console.error("invite-user: /auth/v1/user failed:", callerRes.status, errText);
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Invalid or expired session" }) };
   }
 
@@ -71,8 +90,16 @@ exports.handler = async function(event) {
     }
   );
 
+  if (!profileRes.ok) {
+    const errText = await profileRes.text();
+    console.error("invite-user: user_profiles lookup failed:", profileRes.status, errText);
+    return { statusCode: 502, headers, body: JSON.stringify({ error: "Failed to look up caller profile" }) };
+  }
+
   const profiles = await profileRes.json();
   const callerRole = profiles?.[0]?.role;
+
+  console.log("invite-user: caller role:", callerRole);
 
   if (callerRole !== "admin") {
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Admin access required" }) };
@@ -118,7 +145,16 @@ exports.handler = async function(event) {
     }),
   });
 
-  const inviteData = await inviteRes.json();
+  const inviteText = await inviteRes.text();
+  console.log("invite-user: Supabase invite response:", inviteRes.status, inviteText.slice(0, 200));
+
+  let inviteData;
+  try {
+    inviteData = JSON.parse(inviteText);
+  } catch {
+    console.error("invite-user: Supabase invite returned non-JSON:", inviteText.slice(0, 500));
+    return { statusCode: 502, headers, body: JSON.stringify({ error: "Supabase returned unexpected response — check function logs" }) };
+  }
 
   if (!inviteRes.ok) {
     // Supabase returns 422 when the user already exists
