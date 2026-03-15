@@ -14,8 +14,8 @@ const TIER_COLORS = {
 };
 
 // ─── SUPABASE AUTH ────────────────────────────────────────────────────────────
-const SB_URL      = "https://yhtztcldtliugjaizrdyzu.supabase.co";
-const SB_ANON_KEY = "sb_publishable_xX28c-55YlYaFN1uGHvsPg__rKtBihm";
+const SB_URL      = "https://lhtkmuvfiqbnkppwvsjj.supabase.co";
+const SB_ANON_KEY = "sb_publishable_H3M7RiA4omp-KvMy2s3plg_ce4wO0BV";
 
 // Helpers — call Supabase REST auth endpoints directly (no SDK)
 async function sbSignIn(email, password) {
