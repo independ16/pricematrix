@@ -52,6 +52,22 @@ async function sbSendPasswordReset(email) {
   }
 }
 
+async function sbUpdatePassword(accessToken, newPassword) {
+  const res = await fetch(`${SB_URL}/auth/v1/user`, {
+    method:  "PUT",
+    headers: {
+      "Content-Type":  "application/json",
+      "apikey":        SB_ANON_KEY,
+      "Authorization": `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ password: newPassword }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error_description || data.msg || "Password update failed");
+  }
+}
+
 // Persist session to localStorage
 function saveSession(session) {
   localStorage.setItem("pm_session", JSON.stringify({
@@ -98,6 +114,70 @@ const MOCK_CUSTOMERS = [
   { id:"cust-003", name:"Pacific Coast Contractors", tier:"Wholesale_L2",
     special:{ "COA-EP-001":{0:42.00,5:39.00,25:35.00}, "COA-ZN-001":{0:29.99,10:27.99}, "SEA-RTV-001":{0:7.25,10:6.50} } },
 ];
+
+// ─── PASSWORD SET GATE ───────────────────────────────────────────────────────
+// Shown when the app is opened via a Supabase recovery/invite link.
+// The URL hash contains an access_token with type=recovery or type=invite.
+function PasswordSetGate({ dark, accessToken, onDone }) {
+  const [password,   setPassword]   = useState("");
+  const [confirm,    setConfirm]    = useState("");
+  const [error,      setError]      = useState("");
+  const [loading,    setLoading]    = useState(false);
+  const [done,       setDone]       = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (password !== confirm)  { setError("Passwords do not match."); return; }
+    setError(""); setLoading(true);
+    try {
+      await sbUpdatePassword(accessToken, password);
+      setDone(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className={`app${dark?" dark":""}`}>
+      <style>{CSS}</style>
+      <div className="auth-wrap">
+        <div className="auth-card">
+          <LogoImg size={56} className="auth-logo"/>
+          <div className="auth-title">PriceMatrix</div>
+          <div className="auth-sub">Patio Products, Inc. · Set your password</div>
+          {done ? (
+            <>
+              <div className="auth-reset-msg" style={{marginBottom:16}}>
+                ✓ Password set successfully!<br/>You can now sign in with your new password.
+              </div>
+              <button className="auth-btn" onClick={onDone}>Go to sign in</button>
+            </>
+          ) : (
+            <form className="auth-form" onSubmit={handleSubmit}>
+              {error && <div className="auth-err">{error}</div>}
+              <div className="auth-field">
+                <label className="auth-label">New Password</label>
+                <input className="auth-inp" type="password" placeholder="Minimum 8 characters"
+                  value={password} onChange={e=>setPassword(e.target.value)} autoFocus required/>
+              </div>
+              <div className="auth-field">
+                <label className="auth-label">Confirm Password</label>
+                <input className="auth-inp" type="password" placeholder="Re-enter your password"
+                  value={confirm} onChange={e=>setConfirm(e.target.value)} required/>
+              </div>
+              <button className="auth-btn" type="submit" disabled={loading}>
+                {loading ? "Setting password…" : "Set password"}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ─── DATA HELPERS ─────────────────────────────────────────────────────────────
 const fmt  = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n);
@@ -1993,12 +2073,31 @@ export default function App() {
   const [user,        setUser]       = useState(null);  // null = not logged in
   const [authReady,   setAuthReady]  = useState(false); // true once session restore attempted
   const [showUserMgmt,setShowUserMgmt] = useState(false);
+  // recoverySession: set when opened via a password-reset / invite link in the URL hash
+  const [recoverySession, setRecoverySession] = useState(null); // { accessToken }
 
   const caps = getRoleCapabilities(user?.role);
 
   // ── Restore session on mount ──────────────────────────────────────────────
   useEffect(()=>{
     async function restoreSession() {
+      // ── Detect Supabase recovery / invite link in URL hash ──────────────────
+      // Supabase emails redirect to: https://app.url/#access_token=...&type=recovery
+      // We intercept that here so the user sees a "Set password" form instead of login.
+      const hash = window.location.hash;
+      if (hash && hash.includes("access_token=")) {
+        const params = new URLSearchParams(hash.replace(/^#/, ""));
+        const tokenType = params.get("type"); // "recovery" or "invite"
+        const accessToken = params.get("access_token");
+        if (accessToken && (tokenType === "recovery" || tokenType === "invite")) {
+          // Clear the hash from the URL so a page refresh doesn't re-trigger this
+          window.history.replaceState(null, "", window.location.pathname + window.location.search);
+          setRecoverySession({ accessToken });
+          setAuthReady(true);
+          return;
+        }
+      }
+      // ── Normal session restore ───────────────────────────────────────────────
       const session = loadSession();
       if (!session) { setAuthReady(true); return; }
       // Refresh token if expired or within 5 min of expiry
@@ -2173,6 +2272,15 @@ export default function App() {
         <div className="spinner"/>
       </div>
     </div>
+  );
+
+  // Show password-set form when opened via recovery/invite link
+  if (recoverySession) return (
+    <PasswordSetGate
+      dark={dark}
+      accessToken={recoverySession.accessToken}
+      onDone={()=>setRecoverySession(null)}
+    />
   );
 
   if (!user) return <AuthGate dark={dark} onAuth={u=>setUser(u)} />;
