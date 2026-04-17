@@ -245,7 +245,7 @@ function getTierFlat(data, tier) {
     Object.keys(m).forEach(sku => {
       const ws = wsFlat[sku] || {};
       Object.keys(ws).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
-        if (m[sku][b] == null && ws[b] != null) {
+        if ((m[sku][b] == null || m[sku][b] === 0) && ws[b] != null) {
           m[sku][b] = ws[b];
           m[sku][b + "_fb"] = true; // fallback marker
         }
@@ -260,7 +260,7 @@ function getTierFlat(data, tier) {
 // Returns { price, isFallback }.
 function resolveWLPrice(matrix, childId, tier, qb) {
   const actual = matrix[childId]?.[tier]?.[qb];
-  if (actual != null) return { price: actual, isFallback: false };
+  if (actual != null && actual !== 0) return { price: actual, isFallback: false };
   const ws = matrix[childId]?.Wholesale?.[qb];
   if (ws != null) return { price: ws, isFallback: true };
   return { price: null, isFallback: false };
