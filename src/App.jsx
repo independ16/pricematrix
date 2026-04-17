@@ -245,7 +245,7 @@ function getTierFlat(data, tier) {
     Object.keys(m).forEach(sku => {
       const ws = wsFlat[sku] || {};
       Object.keys(ws).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
-        if ((m[sku][b] == null || m[sku][b] === 0) && ws[b] != null) {
+        if (m[sku][b] == null && ws[b] != null) {
           m[sku][b] = ws[b];
           m[sku][b + "_fb"] = true; // fallback marker
         }
@@ -260,7 +260,7 @@ function getTierFlat(data, tier) {
 // Returns { price, isFallback }.
 function resolveWLPrice(matrix, childId, tier, qb) {
   const actual = matrix[childId]?.[tier]?.[qb];
-  if (actual != null && actual !== 0) return { price: actual, isFallback: false };
+  if (actual != null) return { price: actual, isFallback: false };
   const ws = matrix[childId]?.Wholesale?.[qb];
   if (ws != null) return { price: ws, isFallback: true };
   return { price: null, isFallback: false };
@@ -399,15 +399,15 @@ function computeRedFlags(data) {
       }
     });
 
-    // Flag 3: Wholesale_L2 base price explicitly missing in WooCommerce (display falls back to Wholesale)
+    // Flag 3: Wholesale_L2 base price row completely absent from WooCommerce (display falls back to Wholesale)
     const wsl2Base = rows.find(r => r.tier==="Wholesale_L2" && r.qty_break===0);
-    if (!wsl2Base || !wsl2Base.price || wsl2Base.price === 0) {
+    if (!wsl2Base) {
       addFlag(parentId, "Wholesale_L2 price not set in WooCommerce — displaying Wholesale price");
     }
 
-    // Flag 4: Wholesale_L3 base price explicitly missing in WooCommerce (display falls back to Wholesale)
+    // Flag 4: Wholesale_L3 base price row completely absent from WooCommerce (display falls back to Wholesale)
     const wsl3Base = rows.find(r => r.tier==="Wholesale_L3" && r.qty_break===0);
-    if (!wsl3Base || !wsl3Base.price || wsl3Base.price === 0) {
+    if (!wsl3Base) {
       addFlag(parentId, "Wholesale_L3 price not set in WooCommerce — displaying Wholesale price");
     }
 
