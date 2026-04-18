@@ -216,7 +216,7 @@ function buildMatrix(data, parentId) {
   data.filter(r => r.parent_id === parentId).forEach(r => {
     m[r.child_id] ??= {};
     m[r.child_id][r.tier] ??= {};
-    m[r.child_id][r.tier][r.qty_break] = r.price;
+    m[r.child_id][r.tier][Number(r.qty_break)] = r.price;
   });
   return m;
 }
