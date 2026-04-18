@@ -221,8 +221,8 @@ function buildMatrix(data, parentId) {
   return m;
 }
 
-// For sheet view: { [childSku]: { parent_sku, parent_name, variant_name, category, slug, [qty]: price, [qty+"_fb"]: true } }
-// For WL2/WL3, missing qty_break prices are filled from Wholesale with a _fb (fallback) marker.
+// For sheet view: { [childSku]: { parent_sku, parent_name, variant_name, category, slug, [qty]: price } }
+// For WL2/WL3, missing or zero qty_break prices are silently filled from Wholesale.
 function getTierFlat(data, tier) {
   const m = {};
   data.filter(r => r.tier === tier).forEach(r => {
@@ -235,7 +235,7 @@ function getTierFlat(data, tier) {
     };
     m[r.child_sku][r.qty_break] = r.price;
   });
-  // For WL2/WL3: fill missing breaks from Wholesale rows
+  // For WL2/WL3: fill missing/zero breaks from Wholesale rows
   if (tier === "Wholesale_L2" || tier === "Wholesale_L3") {
     const wsFlat = {};
     data.filter(r => r.tier === "Wholesale").forEach(r => {
@@ -247,7 +247,6 @@ function getTierFlat(data, tier) {
       Object.keys(ws).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
         if (!m[sku][b] && ws[b]) {
           m[sku][b] = ws[b];
-          m[sku][b + "_fb"] = true; // fallback marker
         }
       });
     });
@@ -255,15 +254,12 @@ function getTierFlat(data, tier) {
   return m;
 }
 
-// Resolve a WL2 or WL3 price for display: use actual data if present,
-// otherwise fall back to the Wholesale price at the same qty_break.
-// Returns { price, isFallback }.
+// Resolve a WL2 or WL3 price for display: use actual data if present (and non-zero),
+// otherwise fall back silently to the Wholesale price at the same qty_break.
 function resolveWLPrice(matrix, childId, tier, qb) {
   const actual = matrix[childId]?.[tier]?.[qb];
-  if (actual) return { price: actual, isFallback: false };
-  const ws = matrix[childId]?.Wholesale?.[qb];
-  if (ws != null) return { price: ws, isFallback: true };
-  return { price: null, isFallback: false };
+  if (actual) return actual;
+  return matrix[childId]?.Wholesale?.[qb] ?? null;
 }
 
 function buildSageExport(data) {
@@ -398,18 +394,6 @@ function computeRedFlags(data) {
         addFlag(parentId, `qty_break 0 ≠ qty_break 1${variantLabel} (${tier}) — sentinel mismatch`);
       }
     });
-
-    // Flag 3: Wholesale_L2 base price row completely absent from WooCommerce (display falls back to Wholesale)
-    const wsl2Base = rows.find(r => r.tier==="Wholesale_L2" && r.qty_break===0 && r.price);
-    if (!wsl2Base) {
-      addFlag(parentId, "Wholesale_L2 price not set in WooCommerce — displaying Wholesale price");
-    }
-
-    // Flag 4: Wholesale_L3 base price row completely absent from WooCommerce (display falls back to Wholesale)
-    const wsl3Base = rows.find(r => r.tier==="Wholesale_L3" && r.qty_break===0 && r.price);
-    if (!wsl3Base) {
-      addFlag(parentId, "Wholesale_L3 price not set in WooCommerce — displaying Wholesale price");
-    }
 
     // Flag 5: No quantity discounts — check across all tiers, consolidate into one flag
     const tierBreaks = {};
@@ -680,7 +664,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .pt tbody tr:hover td{background:var(--s2)}
 .pt td.r{text-align:right}
 .pc-ws{color:var(--ws);font-weight:500}
-.badge-ws-fallback{display:inline-block;font-family:var(--fm);font-size:8px;font-weight:600;letter-spacing:.04em;color:var(--ws);background:rgba(58,125,88,.1);border:1px solid rgba(58,125,88,.25);border-radius:3px;padding:0 4px;margin-left:4px;vertical-align:middle;line-height:14px}
 .pc-above{color:var(--above)}
 .pc-below{color:var(--below)}
 .pc-qty{color:var(--text)}
@@ -1403,9 +1386,9 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
                     </td>
                     {breaks.map(q=>{
                       const isWL = selTier==="Wholesale_L2"||selTier==="Wholesale_L3";
-                      const { price, isFallback } = isWL
+                      const price = isWL
                         ? resolveWLPrice(matrix,v.child_id,selTier,q)
-                        : { price: matrix[v.child_id]?.[selTier]?.[q], isFallback: false };
+                        : matrix[v.child_id]?.[selTier]?.[q];
                       const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
                       const isWs    = selTier==="Wholesale";
                       const isBase  = q===0;
@@ -1415,8 +1398,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
                           {price!=null ? (
                             <>
                               <span className={isBase?priceClass:"pc-qty"}>{fmt(price)}</span>
-                              {isBase&&!isFallback&&<PctBadge price={price} wsPrice={wsPrice}/>}
-                              {isBase&&isFallback&&<span className="badge-ws-fallback">=WS</span>}
+                              {isBase&&<PctBadge price={price} wsPrice={wsPrice}/>}
                             </>
                           ) : "—"}
                         </td>
@@ -1456,17 +1438,16 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
                             </td>
                             {breaks.map(q=>{
                               const isWL = tier==="Wholesale_L2"||tier==="Wholesale_L3";
-                              const { price, isFallback } = isWL
+                              const price = isWL
                                 ? resolveWLPrice(matrix,v.child_id,tier,q)
-                                : { price: matrix[v.child_id]?.[tier]?.[q], isFallback: false };
+                                : matrix[v.child_id]?.[tier]?.[q];
                               const wsPrice = matrix[v.child_id]?.Wholesale?.[q];
                               return (
                                 <td key={q} className="r">
                                   {price!=null ? (
                                     <>
                                       <span style={{color:q===0?(isWs?"var(--ws)":TIER_COLORS[tier]):"var(--text)"}}>{fmt(price)}</span>
-                                      {q===0&&!isWs&&!isFallback&&<PctBadge price={price} wsPrice={wsPrice}/>}
-                                      {q===0&&isWL&&isFallback&&<span className="badge-ws-fallback">=WS</span>}
+                                      {q===0&&!isWs&&<PctBadge price={price} wsPrice={wsPrice}/>}
                                     </>
                                   ) : "—"}
                                 </td>
@@ -1629,7 +1610,7 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
                       <td className="print-td-sku">{sku}</td>
                       {catBreaks.map(q=>(
                         <td key={q} className="print-td-price">
-                          {v[q]!=null ? <>{fmt(v[q])}{v[q+"_fb"]&&<span className="badge-ws-fallback">=WS</span>}</> : "—"}
+                          {v[q]!=null ? fmt(v[q]) : "—"}
                         </td>
                       ))}
                     </tr>
@@ -1698,14 +1679,12 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
                   </td>
                   <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{sku}</span></td>
                   {allBreaks.map(q=>{
-                    const p  = v[q];
-                    const fb = v[q + "_fb"];
+                    const p = v[q];
                     const inCat = catBreaks.includes(q);
                     return (
                       <td key={q} className="r">
                         {p!=null
-                          ? <><span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
-                              {fb&&<span className="badge-ws-fallback">=WS</span>}</>
+                          ? <span className={q===0?"s-price-base":"s-price-qty"}>{fmt(p)}</span>
                           : <span style={{color:inCat?"var(--t4)":"var(--s1)"}}>—</span>}
                       </td>
                     );
@@ -1910,7 +1889,6 @@ function _FlagsView_REMOVED({ allData, onSelectProduct }) {
   const FLAG_TYPES = [
     { id:"all",          label:"All flags" },
     { id:"price_zero",   label:"Missing price" },
-    { id:"wl_missing",   label:"WL2/WL3 not set" },
     { id:"tier_order",   label:"Tier order" },
     { id:"qty_ladder",   label:"Qty ladder" },
     { id:"sentinel",     label:"Sentinel mismatch" },
@@ -1923,7 +1901,6 @@ function _FlagsView_REMOVED({ allData, onSelectProduct }) {
 
   const filterMap = {
     price_zero: f => f.includes("Missing or zero"),
-    wl_missing: f => f.includes("not set in WooCommerce"),
     tier_order: f => f.includes("tier order violated") || f.includes("tier violated"),
     qty_ladder: f => f.includes("price increases at qty"),
     sentinel:   f => f.includes("sentinel"),
@@ -2018,7 +1995,6 @@ function _FlagsView_REMOVED({ allData, onSelectProduct }) {
 // ─── FLAG INFO TOOLTIP ────────────────────────────────────────────────────────
 const FLAG_DESCRIPTIONS = [
   { id:"price_zero",  label:"Missing price",       desc:"Wholesale base price (qty 0) is zero or absent. Wholesale is the reference tier — a zero here likely means the data was never populated in the sheet." },
-  { id:"wl_missing",  label:"WL2/WL3 not set",     desc:"Wholesale_L2 or Wholesale_L3 price is not set in WooCommerce for this product. The app displays the Wholesale price as a fallback (matching website behavior), marked =WS. This is normal for most products — only fabrics and vinyl strap by the roll have distinct L2/L3 pricing." },
   { id:"tier_order",  label:"Tier order",           desc:"Prices must follow Retail > Commercial > Wholesale at the base qty break. If a lower tier costs more than a higher tier, something was entered incorrectly." },
   { id:"qty_ladder",  label:"Qty ladder",           desc:"Price should decrease (or stay flat) as quantity increases. A price that goes up at a higher qty break is almost always a data entry error." },
   { id:"sentinel",    label:"Sentinel mismatch",    desc:"qty_break=0 and qty_break=1 are meant to be identical duplicates (sentinel rows). If they differ for the same variant+tier, the sheet has inconsistent data for that row." },
@@ -2234,7 +2210,6 @@ export default function App() {
     { id:"none",       label:"No flag filter" },
     { id:"any",        label:"▲ Any flag" },
     { id:"price_zero", label:"▲ Missing price" },
-    { id:"wl_missing", label:"▲ WL2/WL3 not set" },
     { id:"tier_order", label:"▲ Tier order" },
     { id:"qty_ladder", label:"▲ Qty ladder" },
     { id:"sentinel",   label:"▲ Sentinel mismatch" },
@@ -2248,7 +2223,6 @@ export default function App() {
   const FLAG_FILTER_MATCH = {
     any:        f => true,
     price_zero: f => f.includes("Missing or zero"),
-    wl_missing: f => f.includes("not set in WooCommerce"),
     tier_order: f => f.includes("tier order violated"),
     qty_ladder: f => f.includes("price increases at qty"),
     sentinel:   f => f.includes("sentinel"),
