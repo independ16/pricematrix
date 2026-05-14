@@ -326,9 +326,10 @@ function resolveCustomerPrice(idx, childId, customerId, qty) {
   // Returns { price, source } where source is a PRICE_SOURCE constant
   const entry = idx[String(childId)];
   if (!entry) return { price: null, source: null };
+  // Treat price=0 as missing — zero prices are sentinel/unfilled rows
   const resolve = (arr) => {
-    const match = arr.find(r => qty >= r.qty_break);
-    return match?.price ?? arr.find(r => r.qty_break === 0)?.price ?? null;
+    const match = arr.find(r => qty >= r.qty_break && r.price > 0);
+    return match?.price ?? arr.find(r => r.qty_break === 0 && r.price > 0)?.price ?? null;
   };
   // 1. Customer-specific override (col M / Customer_Specific_Pricing tab)
   const specArr = entry.specific[String(customerId)];
@@ -1820,6 +1821,9 @@ function CustomerView({ allData, caps }) {
         category: decodeEntities(r.category),
       });
     });
+    // Fabric brands excluded from Customer View entirely (no ratio row, no customer pricing)
+    const EXCLUDED_FABRIC_BRANDS = ["sunbrella", "tempotest", "revolution"];
+
     const allVariants = [];
     variantMap.forEach((v, childId)=>{
       const prices={};
@@ -1831,6 +1835,13 @@ function CustomerView({ allData, caps }) {
         else if (source===PRICE_SOURCE.RATIO && topSource!==PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.RATIO;
         else if (source===PRICE_SOURCE.WL3 && topSource==null) topSource=PRICE_SOURCE.WL3;
       });
+      // Drop excluded fabric brands that have no customer pricing (WL3-only fallback)
+      // Also drop variants where no price was resolved at all
+      if (topSource === null) return;
+      if (topSource === PRICE_SOURCE.WL3) {
+        const nameLower = v.parent_name.toLowerCase();
+        if (EXCLUDED_FABRIC_BRANDS.some(b => nameLower.includes(b))) return;
+      }
       allVariants.push({...v, prices, topSource});
     });
     return allVariants.sort((a,b)=>{
