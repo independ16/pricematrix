@@ -105,15 +105,18 @@ function getRoleCapabilities(role) {
   }
 }
 
-// ─── MOCK CUSTOMERS ───────────────────────────────────────────────────────────
-const MOCK_CUSTOMERS = [
-  { id:"cust-001", name:"Acme Industrial Supply", tier:"Wholesale",
-    special:{ "LUB-PRO-001":{0:19.99,5:18.99,10:17.99,25:16.99,50:15.99,100:14.99}, "ADH-EP-002":{0:38.99,10:36.99,25:33.99} } },
-  { id:"cust-002", name:"Bridgewater Maintenance Co.", tier:"Commercial",
-    special:{ "GRS-MP-001":{0:17.50,5:16.50,25:14.99} } },
-  { id:"cust-003", name:"Pacific Coast Contractors", tier:"Wholesale_L2",
-    special:{ "COA-EP-001":{0:42.00,5:39.00,25:35.00}, "COA-ZN-001":{0:29.99,10:27.99}, "SEA-RTV-001":{0:7.25,10:6.50} } },
-];
+// ─── CUSTOMER PRICING ────────────────────────────────────────────────────────
+// Price source constants — used for badges and filtering in Customer View
+const PRICE_SOURCE = { SPECIFIC: "specific", RATIO: "ratio", WL3: "wl3" };
+
+// Human-readable customer names keyed by customer_id (string)
+// Add entries here as new customers are onboarded
+const CUSTOMER_NAMES = {
+  "200012": "PAVCO Furniture, Inc.",
+  "200052": "Florida Patio",
+  "200682": "Alumatech",
+  "100462": "A&K Enterprise of Manatee",
+};
 
 // ─── PASSWORD SET GATE ───────────────────────────────────────────────────────
 // Shown when the app is opened via a Supabase recovery/invite link.
@@ -286,30 +289,64 @@ function pctVsWholesale(price, wsPrice) {
 // Build a tier-price index for fast Customer View lookups:
 // index[child_sku][tier] = sorted array of {qty_break, price}
 function buildCustomerIndex(data) {
+  // Index structure:
+  //   idx[child_id] = {
+  //     specific: { [customer_id]: [{ qty_break, price }, ...] },  // Customer_Specific_Pricing rows
+  //     ratio:    [{ qty_break, price }, ...],                      // Customer tier, customer_id blank
+  //     wl3:      [{ qty_break, price }, ...],                      // Wholesale_L3 fallback
+  //   }
   const idx = {};
   data.forEach(r => {
-    if (r.qty_break === 1) return; // skip sentinel
-    (idx[r.child_sku] ??= {})[r.tier] ??= [];
-    idx[r.child_sku][r.tier].push({ qty_break: r.qty_break, price: r.price });
+    if (Number(r.qty_break) === 1) return; // skip sentinel
+    const cid = String(r.child_id);
+    idx[cid] ??= { specific: {}, ratio: [], wl3: [] };
+    if (r.tier === "Customer") {
+      const custId = String(r.customer_id ?? "").trim();
+      if (custId !== "") {
+        idx[cid].specific[custId] ??= [];
+        idx[cid].specific[custId].push({ qty_break: Number(r.qty_break), price: Number(r.price) });
+      } else {
+        idx[cid].ratio.push({ qty_break: Number(r.qty_break), price: Number(r.price) });
+      }
+    } else if (r.tier === "Wholesale_L3") {
+      idx[cid].wl3.push({ qty_break: Number(r.qty_break), price: Number(r.price) });
+    }
   });
-  // Sort each tier's breaks descending so we can find the first applicable
-  Object.values(idx).forEach(tiers =>
-    Object.values(tiers).forEach(arr => arr.sort((a,b) => b.qty_break - a.qty_break))
-  );
+  // Sort all break arrays descending for lookup
+  Object.values(idx).forEach(entry => {
+    Object.values(entry.specific).forEach(arr => arr.sort((a,b) => b.qty_break - a.qty_break));
+    entry.ratio.sort((a,b) => b.qty_break - a.qty_break);
+    entry.wl3.sort((a,b) => b.qty_break - a.qty_break);
+  });
   return idx;
 }
 
-function resolveCustomerPriceFromIndex(idx, customer, childSku, qty) {
-  const special = customer.special[childSku];
-  if (special) {
-    const specBreaks = Object.keys(special).map(Number).filter(b=>b!==1).sort((a,b)=>b-a);
-    const match = specBreaks.find(b => qty >= b);
-    if (match !== undefined) return { price: special[match], isSpecial: true };
+function resolveCustomerPrice(idx, childId, customerId, qty) {
+  // Three-level lookup: specific → ratio → wl3 fallback
+  // Returns { price, source } where source is a PRICE_SOURCE constant
+  const entry = idx[String(childId)];
+  if (!entry) return { price: null, source: null };
+  const resolve = (arr) => {
+    const match = arr.find(r => qty >= r.qty_break);
+    return match?.price ?? arr.find(r => r.qty_break === 0)?.price ?? null;
+  };
+  // 1. Customer-specific override (col M / Customer_Specific_Pricing tab)
+  const specArr = entry.specific[String(customerId)];
+  if (specArr?.length) {
+    const price = resolve(specArr);
+    if (price != null) return { price, source: PRICE_SOURCE.SPECIFIC };
   }
-  const tierRows = idx[childSku]?.[customer.tier] || [];
-  const match = tierRows.find(r => qty >= r.qty_break);
-  const price = match ? match.price : (tierRows.find(r => r.qty_break === 0)?.price ?? null);
-  return { price, isSpecial: false };
+  // 2. Generic ratio fallback (Customer_Pricing_Ratio_STAGING tab, customer_id blank)
+  if (entry.ratio.length) {
+    const price = resolve(entry.ratio);
+    if (price != null) return { price, source: PRICE_SOURCE.RATIO };
+  }
+  // 3. WL3 fallback (no customer pricing exists for this SKU)
+  if (entry.wl3.length) {
+    const price = resolve(entry.wl3);
+    if (price != null) return { price, source: PRICE_SOURCE.WL3 };
+  }
+  return { price: null, source: null };
 }
 
 function downloadCSV(filename, headers, rows) {
@@ -634,6 +671,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .btn-o:hover{background:var(--brand-dim)}
 .btn-warn{background:transparent;border-color:rgba(201,64,64,.4);color:var(--err)}
 .btn-warn.on{background:var(--err-bg)}
+.btn-xs{padding:2px 8px;font-size:10px;border-radius:4px;border:1px solid var(--b2);font-family:var(--fm);cursor:pointer;background:var(--s2);color:var(--t2)}
+.btn-xs:hover{background:var(--s3);color:var(--text)}
 .row-count{font-family:var(--fm);font-size:10px;color:var(--t3);margin-left:auto}
 
 /* CALC */
@@ -726,6 +765,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .ct td.r{text-align:right;font-family:var(--fm)}
 .ct tbody tr:hover td{background:var(--s2)}
 .spec-flag{font-size:8px;padding:1px 5px;border-radius:3px;background:var(--coral-dim);color:var(--coral);margin-left:5px;border:1px solid rgba(255,95,132,.2)}
+.src-badge-specific{font-size:8px;padding:1px 5px;border-radius:3px;background:var(--coral-dim);color:var(--coral);margin-left:5px;border:1px solid rgba(255,95,132,.2);white-space:nowrap}
+.src-badge-wl3{font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(34,113,168,.12);color:#2271a8;margin-left:5px;border:1px solid rgba(34,113,168,.2);white-space:nowrap}
 .c-price-base{color:var(--brand);font-weight:500}
 .c-price-qty{color:var(--text)}
 .c-price-nil{color:var(--t4)}
@@ -1701,86 +1742,137 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
 
 // ─── CUSTOMER VIEW ────────────────────────────────────────────────────────────
 function CustomerView({ allData, caps }) {
-  const [custId,        setCustId]        = useState(MOCK_CUSTOMERS[0].id);
-  const [search,        setSearch]        = useState("");
-  const [category,      setCategory]      = useState("All");
-  const [specialFilter, setSpecialFilter] = useState("all");
-  const cust = MOCK_CUSTOMERS.find(c=>c.id===custId);
+  // Derive customer list dynamically from Customer-tier rows with a real customer_id
+  const customers = useMemo(()=>{
+    const map = new Map();
+    allData.forEach(r=>{
+      if (r.tier !== "Customer") return;
+      const cid = String(r.customer_id ?? "").trim();
+      if (cid === "") return;
+      if (!map.has(cid)) map.set(cid, { id: cid, name: CUSTOMER_NAMES[cid] || `Customer ${cid}` });
+    });
+    return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name));
+  },[allData]);
 
-  // Pre-build index once — avoids O(n) allData scan per variant×break
+  const [custId,      setCustId]      = useState("");
+  const [search,      setSearch]      = useState("");
+  const [selCats,     setSelCats]     = useState(new Set(["All"]));
+  const [srcFilter,   setSrcFilter]   = useState("all");
+  const [catOpen,     setCatOpen]     = useState(false);
+
+  // Set initial customer once data loads
+  useEffect(()=>{
+    if (custId==="" && customers.length>0) setCustId(customers[0].id);
+  },[customers]);
+
+  const cust = customers.find(c=>c.id===custId) || customers[0];
+
+  // Pre-build index once across all data
   const custIdx = useMemo(()=>buildCustomerIndex(allData),[allData]);
 
+  // Derive qty breaks from Customer-tier + WL3 rows
   const custBreaks = useMemo(()=>{
     const breaks = new Set([0]);
-    // Use the index keys to find breaks for this tier
-    Object.values(custIdx).forEach(tiers=>{
-      (tiers[cust.tier]||[]).forEach(r=>breaks.add(r.qty_break));
+    Object.values(custIdx).forEach(entry=>{
+      entry.ratio.forEach(r=>breaks.add(r.qty_break));
+      if (custId) (entry.specific[String(custId)]||[]).forEach(r=>breaks.add(r.qty_break));
+      entry.wl3.forEach(r=>breaks.add(r.qty_break));
     });
-    return [...breaks].sort((a,b)=>a-b);
-  },[custIdx,cust]);
+    return [...breaks].filter(b=>b!==1).sort((a,b)=>a-b);
+  },[custIdx,custId]);
 
+  // Categories from Customer + WL3 tier rows
   const categories = useMemo(()=>{
     const s = new Set();
-    allData.forEach(r=>{ if(r.category) s.add(decodeEntities(r.category)); });
+    allData.forEach(r=>{
+      if ((r.tier==="Customer"||r.tier==="Wholesale_L3") && r.category)
+        s.add(decodeEntities(r.category));
+    });
     return [...s].sort();
   },[allData]);
 
+  const allCatsSelected = selCats.has("All");
+  const catLabel = allCatsSelected ? "All Categories" : selCats.size===1 ? [...selCats][0] : `${selCats.size} Categories`;
+
+  function toggleCat(cat) {
+    setSelCats(prev=>{
+      const next = new Set(prev);
+      if (cat==="All") return new Set(["All"]);
+      next.delete("All");
+      if (next.has(cat)) { next.delete(cat); if(next.size===0) return new Set(["All"]); }
+      else next.add(cat);
+      return next;
+    });
+  }
+
+  // Build variant rows keyed by child_id
   const rows = useMemo(()=>{
+    if (!custId) return [];
     const variantMap = new Map();
     allData.forEach(r=>{
-      if(!variantMap.has(r.child_sku)) variantMap.set(r.child_sku,{
-        child_sku:r.child_sku, parent_sku:r.parent_sku,
-        parent_name:decodeEntities(r.parent_name), variant_name:decodeEntities(r.variant_name),
-        category:decodeEntities(r.category),
+      if (r.tier !== "Customer" && r.tier !== "Wholesale_L3") return;
+      const cid = String(r.child_id);
+      if (!variantMap.has(cid)) variantMap.set(cid,{
+        child_id: cid,
+        child_sku: r.child_sku, parent_sku: r.parent_sku,
+        parent_name: decodeEntities(r.parent_name),
+        variant_name: decodeEntities(r.variant_name),
+        category: decodeEntities(r.category),
       });
     });
     const allVariants = [];
-    variantMap.forEach((v,childSku)=>{
+    variantMap.forEach((v, childId)=>{
       const prices={};
+      let topSource = null;
       custBreaks.forEach(qty=>{
-        const {price,isSpecial}=resolveCustomerPriceFromIndex(custIdx,cust,childSku,qty);
-        prices[qty]={price,isSpecial};
+        const {price,source}=resolveCustomerPrice(custIdx,childId,custId,qty);
+        prices[qty]={price,source};
+        if (source===PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.SPECIFIC;
+        else if (source===PRICE_SOURCE.RATIO && topSource!==PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.RATIO;
+        else if (source===PRICE_SOURCE.WL3 && topSource==null) topSource=PRICE_SOURCE.WL3;
       });
-      allVariants.push({...v,hasSpecial:!!cust.special[childSku],prices});
+      allVariants.push({...v, prices, topSource});
     });
     return allVariants.sort((a,b)=>{
-      if(a.hasSpecial!==b.hasSpecial) return b.hasSpecial?1:-1;
       if(a.category!==b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[cust,custIdx,custBreaks,allData]);
+  },[custId,custIdx,custBreaks,allData]);
 
-  const effectiveCat = search?"All":category;
   const filtered = useMemo(()=>{
     let list=rows;
-    if(effectiveCat!=="All") list=list.filter(r=>r.category===effectiveCat);
-    if(specialFilter==="special")  list=list.filter(r=>r.hasSpecial);
-    if(specialFilter==="standard") list=list.filter(r=>!r.hasSpecial);
-    if(search){const q=search.toLowerCase();list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q));}
+    if (!allCatsSelected) list=list.filter(r=>selCats.has(r.category));
+    if (srcFilter==="specific") list=list.filter(r=>r.topSource===PRICE_SOURCE.SPECIFIC);
+    if (srcFilter==="ratio")    list=list.filter(r=>r.topSource===PRICE_SOURCE.RATIO);
+    if (srcFilter==="wl3")      list=list.filter(r=>r.topSource===PRICE_SOURCE.WL3);
+    if (search){ const q=search.toLowerCase(); list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q)); }
     return list;
-  },[rows,effectiveCat,specialFilter,search]);
+  },[rows,allCatsSelected,selCats,srcFilter,search]);
 
   let lastCat=null;
   const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
-  const tierColor=TIER_COLORS[cust.tier]||"var(--brand)";
 
   function handleCSV() {
+    if (!cust) return;
     downloadCSV(`${cust.name.replace(/\s+/g,"-")}-prices.csv`,
-      ["sku","product","variant","category",...custBreaks.map(q=>q===0?"price":`qty_${q}_plus`)],
-      filtered.map(r=>[r.child_sku,r.parent_name,r.variant_name,r.category,...custBreaks.map(q=>r.prices[q]?.price??"")])
+      ["sku","product","variant","category","price_source",...custBreaks.map(q=>q===0?"price":`qty_${q}_plus`)],
+      filtered.map(r=>[r.child_sku,r.parent_name,r.variant_name,r.category,r.topSource||"",...custBreaks.map(q=>r.prices[q]?.price??"")])
     );
   }
   function handleJSON() {
+    if (!cust) return;
     const payload=filtered.map(r=>({
       child_sku:r.child_sku,parent_sku:r.parent_sku,parent_name:r.parent_name,
-      variant_name:r.variant_name,category:r.category,tier:cust.tier,
+      variant_name:r.variant_name,category:r.category,price_source:r.topSource,
       prices:Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
     }));
     downloadJSON(`${cust.name.replace(/\s+/g,"-")}-prices.json`, payload);
   }
 
+  if (!cust) return <div style={{padding:40,fontFamily:"var(--fm)",color:"var(--t3)"}}>Loading customer data…</div>;
+
   return (
-    <div className="custv">
+    <div className="custv" onClick={()=>catOpen&&setCatOpen(false)}>
       <div className="print-cust-hdr">
         <h1>Price List — {cust.name}</h1>
         <p>Prepared {today} · Prices valid as of this date · Subject to change without notice</p>
@@ -1788,30 +1880,40 @@ function CustomerView({ allData, caps }) {
       <div className="print-watermark" style={{display:"none"}}>
         CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
       </div>
-      <div className="no-print" style={{padding:"7px 14px",background:"var(--gold-bg)",borderBottom:"1px solid var(--b1)",display:"flex",alignItems:"center",gap:8,fontFamily:"var(--fm)",fontSize:10,color:"var(--gold)"}}>
-        ⚠ Demo data — customer-specific pricing not yet connected.
-      </div>
       <div className="cust-bar">
         <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Customer</span>
-        <select className="cust-sel" value={custId} onChange={e=>{setCustId(e.target.value);setSearch("");setCategory("All");setSpecialFilter("all");}}>
-          {MOCK_CUSTOMERS.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+        <select className="cust-sel" value={custId} onChange={e=>{setCustId(e.target.value);setSearch("");setSelCats(new Set(["All"]));setSrcFilter("all");}}>
+          {customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <span className="no-print" style={{padding:"3px 10px",borderRadius:20,fontSize:10,fontFamily:"var(--fm)",background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}40`,whiteSpace:"nowrap"}}>
-          {cust.tier}
-        </span>
         <div className="divider no-print"/>
-        <select className="cust-sel no-print" value={category} onChange={e=>setCategory(e.target.value)}>
-          <option value="All">All Categories</option>
-          {categories.map(c=><option key={c} value={c}>{c}</option>)}
-        </select>
-        <select className="cust-sel no-print" value={specialFilter} onChange={e=>setSpecialFilter(e.target.value)}>
+        <div className="no-print" style={{position:"relative"}} onClick={e=>e.stopPropagation()}>
+          <button className="cust-sel" style={{cursor:"pointer"}} onClick={()=>setCatOpen(p=>!p)}>
+            {catLabel} <span style={{fontSize:9,opacity:.5}}>▾</span>
+          </button>
+          {catOpen&&(
+            <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,zIndex:200,background:"var(--s1)",border:"1px solid var(--b2)",borderRadius:8,padding:"6px 0",minWidth:230,maxHeight:320,overflowY:"auto",boxShadow:"0 4px 16px rgba(0,0,0,.14)"}}>
+              <div style={{display:"flex",gap:6,padding:"4px 10px 8px",borderBottom:"1px solid var(--b1)"}}>
+                <button className="btn btn-xs" onClick={()=>{setSelCats(new Set(["All"]));setCatOpen(false);}}>All</button>
+                <button className="btn btn-xs" onClick={()=>setSelCats(new Set())}>None</button>
+              </div>
+              {categories.map(cat=>(
+                <label key={cat} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 12px",cursor:"pointer",fontSize:11,fontFamily:"var(--fm)",color:"var(--text)"}}>
+                  <input type="checkbox" checked={allCatsSelected||selCats.has(cat)} onChange={()=>toggleCat(cat)} style={{accentColor:"var(--brand)"}}/>
+                  {cat}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+        <select className="cust-sel no-print" value={srcFilter} onChange={e=>setSrcFilter(e.target.value)}>
           <option value="all">All Pricing</option>
-          <option value="special">Special Only</option>
-          <option value="standard">Standard Only</option>
+          <option value="specific">Custom Price Only</option>
+          <option value="ratio">Standard Customer Price</option>
+          <option value="wl3">WL3 Fallback</option>
         </select>
         <input className="inp no-print" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} variants</span>
-        <button className="btn btn-a no-print" onClick={()=>window.print()}>⊞ Print / PDF</button>
+        <button className="btn btn-a no-print" onClick={e=>{e.stopPropagation();window.print();}}>⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportJSON && <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>}
       </div>
@@ -1823,7 +1925,7 @@ function CustomerView({ allData, caps }) {
               <th style={{minWidth:200,maxWidth:280,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)",minWidth:100}}>SKU</th>
               {custBreaks.map(q=>(
-                <th key={q} className="r" style={{color:q===0?tierColor:undefined,width:"1px",whiteSpace:"nowrap"}}>
+                <th key={q} className="r" style={{width:"1px",whiteSpace:"nowrap"}}>
                   {q===0?"Price":`${q}+`}
                 </th>
               ))}
@@ -1839,20 +1941,24 @@ function CustomerView({ allData, caps }) {
                     <td colSpan={2+custBreaks.length} style={{position:"sticky",left:0}}>{r.category}</td>
                   </tr>
                 ),
-                <tr key={r.child_sku}>
+                <tr key={r.child_id}>
                   <td style={{minWidth:200,maxWidth:280,whiteSpace:"normal",position:"sticky",left:0,background:"var(--s1)",zIndex:1}}>
-                    <div className="s-name">{r.parent_name}{r.hasSpecial&&<span className="spec-flag">SPECIAL</span>}</div>
+                    <div className="s-name">
+                      {r.parent_name}
+                      {r.topSource===PRICE_SOURCE.SPECIFIC&&<span className="src-badge-specific">CUSTOM</span>}
+                      {r.topSource===PRICE_SOURCE.WL3&&<span className="src-badge-wl3">WL3</span>}
+                    </div>
                     {r.variant_name!=="Simple"&&<div className="s-var">{r.variant_name}</div>}
                   </td>
                   <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{r.child_sku}</span></td>
                   {custBreaks.map(q=>{
                     const pd=r.prices[q];
                     const price=pd?.price;
-                    const isSpecial=pd?.isSpecial;
+                    const src=pd?.source;
                     return (
                       <td key={q} className="r">
                         {price!=null
-                          ? <span style={{color:q===0?(isSpecial?"var(--coral)":"var(--brand)"):isSpecial?"var(--coral)":"var(--text)"}}>{fmt(price)}</span>
+                          ? <span style={{color:src===PRICE_SOURCE.SPECIFIC?"var(--coral)":src===PRICE_SOURCE.WL3?"#2271a8":"var(--brand)"}}>{fmt(price)}</span>
                           : <span className="c-price-nil">—</span>}
                       </td>
                     );
