@@ -112,10 +112,10 @@ const PRICE_SOURCE = { SPECIFIC: "specific", RATIO: "ratio", WL3: "wl3" };
 // Human-readable customer names keyed by customer_id (string)
 // Add entries here as new customers are onboarded
 const CUSTOMER_NAMES = {
-  "200012": "PAVCO Furniture, Inc.",
-  "200052": "Florida Patio",
-  "200682": "Alumatech",
-  "100462": "A&K Enterprise of Manatee",
+  "425":  "PAVCO Furniture, Inc.",
+  "483":  "A&K Enterprise of Manatee",
+  "418":  "Florida Patio",
+  "601":  "Alumatech",
 };
 
 // ─── PASSWORD SET GATE ───────────────────────────────────────────────────────
@@ -297,7 +297,7 @@ function buildCustomerIndex(data) {
   //   }
   const idx = {};
   data.forEach(r => {
-    if (Number(r.qty_break) === 1) return; // skip sentinel
+    if (Number(r.qty_break) === 1 && r.tier !== "Customer") return; // skip sentinel (preserve col M customer rows)
     const cid = String(r.child_id);
     idx[cid] ??= { specific: {}, ratio: [], wl3: [] };
     if (r.tier === "Customer") {
@@ -768,6 +768,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 .spec-flag{font-size:8px;padding:1px 5px;border-radius:3px;background:var(--coral-dim);color:var(--coral);margin-left:5px;border:1px solid rgba(255,95,132,.2)}
 .src-badge-specific{font-size:8px;padding:1px 5px;border-radius:3px;background:var(--coral-dim);color:var(--coral);margin-left:5px;border:1px solid rgba(255,95,132,.2);white-space:nowrap}
 .src-badge-wl3{font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(34,113,168,.12);color:#2271a8;margin-left:5px;border:1px solid rgba(34,113,168,.2);white-space:nowrap}
+.src-badge-ratio{font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(72,147,103,.12);color:var(--brand);margin-left:5px;border:1px solid rgba(72,147,103,.2);white-space:nowrap}
 .c-price-base{color:var(--brand);font-weight:500}
 .c-price-qty{color:var(--text)}
 .c-price-nil{color:var(--t4)}
@@ -1860,14 +1861,25 @@ function CustomerView({ allData, caps }) {
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search]);
 
+  // Trim to only breaks where at least one filtered row has a real price
+  // NOTE: must be declared after filtered — depends on filtered being defined
+  const visibleBreaks = useMemo(()=>{
+    if (!filtered.length) return custBreaks;
+    const used = new Set();
+    filtered.forEach(r=>{
+      custBreaks.forEach(q=>{ if (r.prices[q]?.price != null) used.add(q); });
+    });
+    return custBreaks.filter(q=>used.has(q));
+  },[filtered, custBreaks]);
+
   let lastCat=null;
   const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
 
   function handleCSV() {
     if (!cust) return;
     downloadCSV(`${cust.name.replace(/\s+/g,"-")}-prices.csv`,
-      ["sku","product","variant","category","price_source",...custBreaks.map(q=>q===0?"price":`qty_${q}_plus`)],
-      filtered.map(r=>[r.child_sku,r.parent_name,r.variant_name,r.category,r.topSource||"",...custBreaks.map(q=>r.prices[q]?.price??"")])
+      ["sku","product","variant","category","price_source",...visibleBreaks.map(q=>q===0?"price":`${q}+`)],
+      filtered.map(r=>[r.child_sku,r.parent_name,r.variant_name,r.category,r.topSource||"",...visibleBreaks.map(q=>r.prices[q]?.price??"")])
     );
   }
   function handleJSON() {
@@ -1918,9 +1930,9 @@ function CustomerView({ allData, caps }) {
         </div>
         <select className="cust-sel no-print" value={srcFilter} onChange={e=>setSrcFilter(e.target.value)}>
           <option value="all">All Pricing</option>
-          <option value="specific">Custom Price Only</option>
-          <option value="ratio">Standard Customer Price</option>
-          <option value="wl3">WL3 Fallback</option>
+          <option value="specific">Specific Unit Price</option>
+          <option value="ratio">Tier-Based Price</option>
+          <option value="wl3">Standard WL3 Price</option>
         </select>
         <input className="inp no-print" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
         <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} variants</span>
@@ -1935,7 +1947,7 @@ function CustomerView({ allData, caps }) {
             <tr>
               <th style={{minWidth:200,maxWidth:280,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)",minWidth:100}}>SKU</th>
-              {custBreaks.map(q=>(
+              {visibleBreaks.map(q=>(
                 <th key={q} className="r" style={{width:"1px",whiteSpace:"nowrap"}}>
                   {q===0?"Price":`${q}+`}
                 </th>
@@ -1957,12 +1969,13 @@ function CustomerView({ allData, caps }) {
                     <div className="s-name">
                       {r.parent_name}
                       {r.topSource===PRICE_SOURCE.SPECIFIC&&<span className="src-badge-specific">CUSTOM</span>}
+                      {r.topSource===PRICE_SOURCE.RATIO&&<span className="src-badge-ratio">TIER</span>}
                       {r.topSource===PRICE_SOURCE.WL3&&<span className="src-badge-wl3">WL3</span>}
                     </div>
                     {r.variant_name!=="Simple"&&<div className="s-var">{r.variant_name}</div>}
                   </td>
                   <td style={{position:"sticky",left:200,background:"var(--s1)",zIndex:1,boxShadow:"2px 0 4px rgba(0,0,0,.06)"}}><span className="s-sku">{r.child_sku}</span></td>
-                  {custBreaks.map(q=>{
+                  {visibleBreaks.map(q=>{
                     const pd=r.prices[q];
                     const price=pd?.price;
                     const src=pd?.source;
