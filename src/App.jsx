@@ -1866,27 +1866,28 @@ function CustomerView({ allData, caps }) {
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search]);
 
-  // Trim to only breaks where at least one filtered row has a price change vs prior break
+  // Trim to only breaks where at least one filtered row has a REAL indexed entry
+  // (not a fallback-resolved price). Mirrors Sheet View: only show columns where
+  // actual source data exists, not where the resolver back-filled a prior break.
   // NOTE: must be declared after filtered — depends on filtered being defined
   const visibleBreaks = useMemo(()=>{
-    if (!filtered.length) return custBreaks;
-    // Always include qty=0 (base price column)
+    if (!filtered.length) return [0];
     const used = new Set([0]);
-    // For each row, walk breaks in order and only mark a break as needed
-    // if the price at that break differs from the price at the previous *used* break
     filtered.forEach(r=>{
-      // SPECIFIC (col M) rows are flat price — only show base column, no break columns
+      // SPECIFIC (col M) rows are flat — base price column only, no break columns
       if (r.topSource === PRICE_SOURCE.SPECIFIC) return;
-      let prevPrice = r.prices[0]?.price ?? null;
-      custBreaks.forEach(q=>{
-        if (q === 0) return;
-        const p = r.prices[q]?.price ?? null;
-        if (p != null && p !== prevPrice) { used.add(q); prevPrice = p; }
-        else if (p != null && p === prevPrice) { /* same price — skip column */ }
-      });
+      const entry = custIdx[String(r.child_id)];
+      if (!entry) return;
+      // Collect breaks that have a real entry in the source arrays
+      const realBreaks = new Set();
+      entry.ratio.forEach(x=>{ if(x.price>0) realBreaks.add(x.qty_break); });
+      (entry.specific[String(custId)]||[]).forEach(x=>{ if(x.price>0) realBreaks.add(x.qty_break); });
+      entry.wl3.forEach(x=>{ if(x.price>0) realBreaks.add(x.qty_break); });
+      // Only expose breaks >0 that are both real AND in custBreaks (no sentinels)
+      realBreaks.forEach(q=>{ if(q>1) used.add(q); });
     });
     return custBreaks.filter(q=>used.has(q));
-  },[filtered, custBreaks]);
+  },[filtered, custBreaks, custIdx, custId]);
 
   let lastCat=null;
   const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
@@ -1977,7 +1978,7 @@ function CustomerView({ allData, caps }) {
               return [
                 showCat&&(
                   <tr key={`ch-${r.category}`} className="cat-hdr">
-                    <td colSpan={2+custBreaks.length} style={{position:"sticky",left:0}}>{r.category}</td>
+                    <td colSpan={2+visibleBreaks.length} style={{position:"sticky",left:0}}>{r.category}</td>
                   </tr>
                 ),
                 <tr key={r.child_id}>
