@@ -115,6 +115,7 @@ const CUSTOMER_NAMES = {
   "425":  "PAVCO Furniture, Inc.",
   "483":  "A&K Enterprise of Manatee",
   "418":  "Florida Patio",
+  "441":  "Leisure Furniture",
   "601":  "Alumatech",
 };
 
@@ -1814,13 +1815,11 @@ function CustomerView({ allData, caps }) {
 
   // Build variant rows keyed by child_id — Sheet View style:
   // prices stored as row[qty_break]=price ONLY for real source entries (no fallback-filling).
-  // This means visibleBreaks can be derived from Object.keys, just like Sheet View's allBreaks.
   const rows = useMemo(()=>{
     if (!custId) return [];
     const EXCLUDED_FABRIC_BRANDS = ["sunbrella", "tempotest", "revolution"];
     const variantMeta = new Map();
 
-    // Pass 1: collect variant metadata from Customer + WL3 rows
     allData.forEach(r=>{
       if (r.tier !== "Customer" && r.tier !== "Wholesale_L3") return;
       const cid = String(r.child_id);
@@ -1838,7 +1837,6 @@ function CustomerView({ allData, caps }) {
       const entry = custIdx[childId];
       if (!entry) return;
 
-      // Determine topSource (specific > ratio > wl3)
       const hasSpecific = (entry.specific[String(custId)]||[]).some(x=>x.price>0);
       const hasRatio    = entry.ratio.some(x=>x.price>0);
       const hasWl3      = entry.wl3.some(x=>x.price>0);
@@ -1852,19 +1850,13 @@ function CustomerView({ allData, caps }) {
         if (EXCLUDED_FABRIC_BRANDS.some(b => nameLower.includes(b))) return;
       }
 
-      // Build prices object: row[qty_break] = { price, source }
-      // Only store real entries — no fallback-filling across all custBreaks.
-      // Sheet View does m[sku][qty_break] = price; we do the same here.
       const prices = {};
-
       if (topSource === PRICE_SOURCE.SPECIFIC) {
-        // col M rows: only store qty_break=0 price (flat rate, no break columns)
         const specArr = entry.specific[String(custId)] || [];
         const base = specArr.find(x=>x.qty_break===0 && x.price>0)
                   || specArr.find(x=>x.price>0);
         if (base) prices[0] = { price: base.price, source: PRICE_SOURCE.SPECIFIC };
       } else {
-        // For ratio/wl3: store each real break entry directly
         const srcArr = topSource === PRICE_SOURCE.RATIO ? entry.ratio : entry.wl3;
         const srcLabel = topSource === PRICE_SOURCE.RATIO ? PRICE_SOURCE.RATIO : PRICE_SOURCE.WL3;
         srcArr.forEach(x=>{
@@ -1894,13 +1886,10 @@ function CustomerView({ allData, caps }) {
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search]);
 
-  // Derive visible breaks exactly like Sheet View's allBreaks —
-  // collect numeric keys from row.prices objects (only real entries exist there now)
+  // Derive visible breaks from Object.keys — only real entries exist in prices now
   const visibleBreaks = useMemo(()=>{
     const s = new Set();
-    filtered.forEach(r=>{
-      Object.keys(r.prices).map(Number).forEach(q=>s.add(q));
-    });
+    filtered.forEach(r=>{ Object.keys(r.prices).map(Number).forEach(q=>s.add(q)); });
     return [...s].sort((a,b)=>a-b);
   },[filtered]);
 
