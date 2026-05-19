@@ -1812,19 +1812,14 @@ function CustomerView({ allData, caps }) {
     });
   }
 
-  // Build variant rows keyed by child_id — Sheet View style:
-  // prices stored as row[qty_break]=price ONLY for real source entries (no fallback-filling).
-  // This means visibleBreaks can be derived from Object.keys, just like Sheet View's allBreaks.
+  // Build variant rows keyed by child_id
   const rows = useMemo(()=>{
     if (!custId) return [];
-    const EXCLUDED_FABRIC_BRANDS = ["sunbrella", "tempotest", "revolution"];
-    const variantMeta = new Map();
-
-    // Pass 1: collect variant metadata from Customer + WL3 rows
+    const variantMap = new Map();
     allData.forEach(r=>{
       if (r.tier !== "Customer" && r.tier !== "Wholesale_L3") return;
       const cid = String(r.child_id);
-      if (!variantMeta.has(cid)) variantMeta.set(cid,{
+      if (!variantMap.has(cid)) variantMap.set(cid,{
         child_id: cid,
         child_sku: r.child_sku, parent_sku: r.parent_sku,
         parent_name: decodeEntities(r.parent_name),
@@ -1832,57 +1827,34 @@ function CustomerView({ allData, caps }) {
         category: decodeEntities(r.category),
       });
     });
+    // Fabric brands excluded from Customer View entirely (no ratio row, no customer pricing)
+    const EXCLUDED_FABRIC_BRANDS = ["sunbrella", "tempotest", "revolution"];
 
     const allVariants = [];
-    variantMeta.forEach((v, childId)=>{
-      const entry = custIdx[childId];
-      if (!entry) return;
-
-      // Determine topSource (specific > ratio > wl3)
-      const hasSpecific = (entry.specific[String(custId)]||[]).some(x=>x.price>0);
-      const hasRatio    = entry.ratio.some(x=>x.price>0);
-      const hasWl3      = entry.wl3.some(x=>x.price>0);
+    variantMap.forEach((v, childId)=>{
+      const prices={};
       let topSource = null;
-      if (hasSpecific) topSource = PRICE_SOURCE.SPECIFIC;
-      else if (hasRatio) topSource = PRICE_SOURCE.RATIO;
-      else if (hasWl3)  topSource = PRICE_SOURCE.WL3;
+      custBreaks.forEach(qty=>{
+        const {price,source}=resolveCustomerPrice(custIdx,childId,custId,qty);
+        prices[qty]={price,source};
+        if (source===PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.SPECIFIC;
+        else if (source===PRICE_SOURCE.RATIO && topSource!==PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.RATIO;
+        else if (source===PRICE_SOURCE.WL3 && topSource==null) topSource=PRICE_SOURCE.WL3;
+      });
+      // Drop excluded fabric brands that have no customer pricing (WL3-only fallback)
+      // Also drop variants where no price was resolved at all
       if (topSource === null) return;
       if (topSource === PRICE_SOURCE.WL3) {
         const nameLower = v.parent_name.toLowerCase();
         if (EXCLUDED_FABRIC_BRANDS.some(b => nameLower.includes(b))) return;
       }
-
-      // Build prices object: row[qty_break] = { price, source }
-      // Only store real entries — no fallback-filling across all custBreaks.
-      // Sheet View does m[sku][qty_break] = price; we do the same here.
-      const prices = {};
-
-      if (topSource === PRICE_SOURCE.SPECIFIC) {
-        // col M rows: only store qty_break=0 price (flat rate, no break columns)
-        const specArr = entry.specific[String(custId)] || [];
-        const base = specArr.find(x=>x.qty_break===0 && x.price>0)
-                  || specArr.find(x=>x.price>0);
-        if (base) prices[0] = { price: base.price, source: PRICE_SOURCE.SPECIFIC };
-      } else {
-        // For ratio/wl3: store each real break entry directly
-        const srcArr = topSource === PRICE_SOURCE.RATIO ? entry.ratio : entry.wl3;
-        const srcLabel = topSource === PRICE_SOURCE.RATIO ? PRICE_SOURCE.RATIO : PRICE_SOURCE.WL3;
-        srcArr.forEach(x=>{
-          if (x.price > 0 && x.qty_break !== 1) {
-            prices[x.qty_break] = { price: x.price, source: srcLabel };
-          }
-        });
-      }
-
-      if (Object.keys(prices).length === 0) return;
       allVariants.push({...v, prices, topSource});
     });
-
     return allVariants.sort((a,b)=>{
       if(a.category!==b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[custId,custIdx,allData]);
+  },[custId,custIdx,custBreaks,allData]);
 
   const filtered = useMemo(()=>{
     let list=rows;
@@ -1894,15 +1866,27 @@ function CustomerView({ allData, caps }) {
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search]);
 
-  // Derive visible breaks exactly like Sheet View's allBreaks —
-  // collect numeric keys from row.prices objects (only real entries exist there now)
+  // Trim to only breaks where at least one filtered row has a price change vs prior break
+  // NOTE: must be declared after filtered — depends on filtered being defined
   const visibleBreaks = useMemo(()=>{
-    const s = new Set();
+    if (!filtered.length) return custBreaks;
+    // Always include qty=0 (base price column)
+    const used = new Set([0]);
+    // For each row, walk breaks in order and only mark a break as needed
+    // if the price at that break differs from the price at the previous *used* break
     filtered.forEach(r=>{
-      Object.keys(r.prices).map(Number).forEach(q=>s.add(q));
+      // SPECIFIC (col M) rows are flat price — only show base column, no break columns
+      if (r.topSource === PRICE_SOURCE.SPECIFIC) return;
+      let prevPrice = r.prices[0]?.price ?? null;
+      custBreaks.forEach(q=>{
+        if (q === 0) return;
+        const p = r.prices[q]?.price ?? null;
+        if (p != null && p !== prevPrice) { used.add(q); prevPrice = p; }
+        else if (p != null && p === prevPrice) { /* same price — skip column */ }
+      });
     });
-    return [...s].sort((a,b)=>a-b);
-  },[filtered]);
+    return custBreaks.filter(q=>used.has(q));
+  },[filtered, custBreaks]);
 
   let lastCat=null;
   const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
@@ -1919,7 +1903,7 @@ function CustomerView({ allData, caps }) {
     const payload=filtered.map(r=>({
       child_sku:r.child_sku,parent_sku:r.parent_sku,parent_name:r.parent_name,
       variant_name:r.variant_name,category:r.category,price_source:r.topSource,
-      prices:Object.fromEntries(Object.keys(r.prices).map(Number).map(q=>[q,r.prices[q].price])),
+      prices:Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
     }));
     downloadJSON(`${cust.name.replace(/\s+/g,"-")}-prices.json`, payload);
   }
@@ -1980,7 +1964,7 @@ function CustomerView({ allData, caps }) {
               <th style={{minWidth:200,maxWidth:280,position:"sticky",left:0,zIndex:11,background:"var(--s1)"}}>Product / Variant</th>
               <th style={{position:"sticky",left:200,zIndex:11,background:"var(--s1)",boxShadow:"2px 0 4px rgba(0,0,0,.06)",minWidth:100}}>SKU</th>
               {visibleBreaks.map(q=>(
-                <th key={q} className="r" style={{width:"1px",whiteSpace:"nowrap"}}>
+                <th key={q} style={{width:"1px",whiteSpace:"nowrap",paddingLeft:16}}>
                   {q===0?"Price":`${q}+`}
                 </th>
               ))}
@@ -1993,7 +1977,7 @@ function CustomerView({ allData, caps }) {
               return [
                 showCat&&(
                   <tr key={`ch-${r.category}`} className="cat-hdr">
-                    <td colSpan={2+visibleBreaks.length} style={{position:"sticky",left:0}}>{r.category}</td>
+                    <td colSpan={2+custBreaks.length} style={{position:"sticky",left:0}}>{r.category}</td>
                   </tr>
                 ),
                 <tr key={r.child_id}>
@@ -2014,7 +1998,7 @@ function CustomerView({ allData, caps }) {
                     // For col M (SPECIFIC) rows: flat price — show only at qty=0, dash elsewhere
                     const isSpecificNonBase = r.topSource===PRICE_SOURCE.SPECIFIC && q!==0;
                     return (
-                      <td key={q} className="r">
+                      <td key={q} style={{paddingLeft:16}}>
                         {!isSpecificNonBase && price!=null
                           ? <span style={{color:src===PRICE_SOURCE.SPECIFIC?"var(--coral)":src===PRICE_SOURCE.WL3?"#2271a8":"var(--brand)"}}>{fmt(price)}</span>
                           : <span className="c-price-nil">—</span>}
