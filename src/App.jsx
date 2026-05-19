@@ -1798,9 +1798,14 @@ function CustomerView({ allData, caps }) {
 
   function toggleCat(cat) {
     setSelCats(prev=>{
-      const next = new Set(prev);
       if (cat==="All") return new Set(["All"]);
-      next.delete("All");
+      // If currently "All selected", switch to "all except this one"
+      if (prev.has("All")) {
+        const next = new Set(categories);
+        next.delete(cat);
+        return next.size===0 ? new Set(["All"]) : next;
+      }
+      const next = new Set(prev);
       if (next.has(cat)) { next.delete(cat); if(next.size===0) return new Set(["All"]); }
       else next.add(cat);
       return next;
@@ -1861,13 +1866,22 @@ function CustomerView({ allData, caps }) {
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search]);
 
-  // Trim to only breaks where at least one filtered row has a real price
+  // Trim to only breaks where at least one filtered row has a price change vs prior break
   // NOTE: must be declared after filtered — depends on filtered being defined
   const visibleBreaks = useMemo(()=>{
     if (!filtered.length) return custBreaks;
-    const used = new Set();
+    // Always include qty=0 (base price column)
+    const used = new Set([0]);
     filtered.forEach(r=>{
-      custBreaks.forEach(q=>{ if (r.prices[q]?.price != null) used.add(q); });
+      let prevPrice = r.prices[0]?.price ?? null;
+      custBreaks.forEach(q=>{
+        if (q === 0) return;
+        const p = r.prices[q]?.price ?? null;
+        // Show column if: SPECIFIC source shows price only at qty=0 break (flat price)
+        // or price exists and differs from previous break
+        if (p != null && p !== prevPrice) used.add(q);
+        if (p != null) prevPrice = p;
+      });
     });
     return custBreaks.filter(q=>used.has(q));
   },[filtered, custBreaks]);
@@ -1979,9 +1993,11 @@ function CustomerView({ allData, caps }) {
                     const pd=r.prices[q];
                     const price=pd?.price;
                     const src=pd?.source;
+                    // For col M (SPECIFIC) rows: flat price — show only at qty=0, dash elsewhere
+                    const isSpecificNonBase = r.topSource===PRICE_SOURCE.SPECIFIC && q!==0;
                     return (
                       <td key={q} className="r">
-                        {price!=null
+                        {!isSpecificNonBase && price!=null
                           ? <span style={{color:src===PRICE_SOURCE.SPECIFIC?"var(--coral)":src===PRICE_SOURCE.WL3?"#2271a8":"var(--brand)"}}>{fmt(price)}</span>
                           : <span className="c-price-nil">—</span>}
                       </td>
