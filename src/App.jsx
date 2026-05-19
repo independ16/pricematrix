@@ -1812,14 +1812,19 @@ function CustomerView({ allData, caps }) {
     });
   }
 
-  // Build variant rows keyed by child_id
+  // Build variant rows keyed by child_id — Sheet View style:
+  // prices stored as row[qty_break]=price ONLY for real source entries (no fallback-filling).
+  // This means visibleBreaks can be derived from Object.keys, just like Sheet View's allBreaks.
   const rows = useMemo(()=>{
     if (!custId) return [];
-    const variantMap = new Map();
+    const EXCLUDED_FABRIC_BRANDS = ["sunbrella", "tempotest", "revolution"];
+    const variantMeta = new Map();
+
+    // Pass 1: collect variant metadata from Customer + WL3 rows
     allData.forEach(r=>{
       if (r.tier !== "Customer" && r.tier !== "Wholesale_L3") return;
       const cid = String(r.child_id);
-      if (!variantMap.has(cid)) variantMap.set(cid,{
+      if (!variantMeta.has(cid)) variantMeta.set(cid,{
         child_id: cid,
         child_sku: r.child_sku, parent_sku: r.parent_sku,
         parent_name: decodeEntities(r.parent_name),
@@ -1827,34 +1832,57 @@ function CustomerView({ allData, caps }) {
         category: decodeEntities(r.category),
       });
     });
-    // Fabric brands excluded from Customer View entirely (no ratio row, no customer pricing)
-    const EXCLUDED_FABRIC_BRANDS = ["sunbrella", "tempotest", "revolution"];
 
     const allVariants = [];
-    variantMap.forEach((v, childId)=>{
-      const prices={};
+    variantMeta.forEach((v, childId)=>{
+      const entry = custIdx[childId];
+      if (!entry) return;
+
+      // Determine topSource (specific > ratio > wl3)
+      const hasSpecific = (entry.specific[String(custId)]||[]).some(x=>x.price>0);
+      const hasRatio    = entry.ratio.some(x=>x.price>0);
+      const hasWl3      = entry.wl3.some(x=>x.price>0);
       let topSource = null;
-      custBreaks.forEach(qty=>{
-        const {price,source}=resolveCustomerPrice(custIdx,childId,custId,qty);
-        prices[qty]={price,source};
-        if (source===PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.SPECIFIC;
-        else if (source===PRICE_SOURCE.RATIO && topSource!==PRICE_SOURCE.SPECIFIC) topSource=PRICE_SOURCE.RATIO;
-        else if (source===PRICE_SOURCE.WL3 && topSource==null) topSource=PRICE_SOURCE.WL3;
-      });
-      // Drop excluded fabric brands that have no customer pricing (WL3-only fallback)
-      // Also drop variants where no price was resolved at all
+      if (hasSpecific) topSource = PRICE_SOURCE.SPECIFIC;
+      else if (hasRatio) topSource = PRICE_SOURCE.RATIO;
+      else if (hasWl3)  topSource = PRICE_SOURCE.WL3;
       if (topSource === null) return;
       if (topSource === PRICE_SOURCE.WL3) {
         const nameLower = v.parent_name.toLowerCase();
         if (EXCLUDED_FABRIC_BRANDS.some(b => nameLower.includes(b))) return;
       }
+
+      // Build prices object: row[qty_break] = { price, source }
+      // Only store real entries — no fallback-filling across all custBreaks.
+      // Sheet View does m[sku][qty_break] = price; we do the same here.
+      const prices = {};
+
+      if (topSource === PRICE_SOURCE.SPECIFIC) {
+        // col M rows: only store qty_break=0 price (flat rate, no break columns)
+        const specArr = entry.specific[String(custId)] || [];
+        const base = specArr.find(x=>x.qty_break===0 && x.price>0)
+                  || specArr.find(x=>x.price>0);
+        if (base) prices[0] = { price: base.price, source: PRICE_SOURCE.SPECIFIC };
+      } else {
+        // For ratio/wl3: store each real break entry directly
+        const srcArr = topSource === PRICE_SOURCE.RATIO ? entry.ratio : entry.wl3;
+        const srcLabel = topSource === PRICE_SOURCE.RATIO ? PRICE_SOURCE.RATIO : PRICE_SOURCE.WL3;
+        srcArr.forEach(x=>{
+          if (x.price > 0 && x.qty_break !== 1) {
+            prices[x.qty_break] = { price: x.price, source: srcLabel };
+          }
+        });
+      }
+
+      if (Object.keys(prices).length === 0) return;
       allVariants.push({...v, prices, topSource});
     });
+
     return allVariants.sort((a,b)=>{
       if(a.category!==b.category) return a.category.localeCompare(b.category);
       return a.parent_name.localeCompare(b.parent_name);
     });
-  },[custId,custIdx,custBreaks,allData]);
+  },[custId,custIdx,allData]);
 
   const filtered = useMemo(()=>{
     let list=rows;
@@ -1866,28 +1894,15 @@ function CustomerView({ allData, caps }) {
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search]);
 
-  // Trim to only breaks where at least one filtered row has a REAL indexed entry
-  // (not a fallback-resolved price). Mirrors Sheet View: only show columns where
-  // actual source data exists, not where the resolver back-filled a prior break.
-  // NOTE: must be declared after filtered — depends on filtered being defined
+  // Derive visible breaks exactly like Sheet View's allBreaks —
+  // collect numeric keys from row.prices objects (only real entries exist there now)
   const visibleBreaks = useMemo(()=>{
-    if (!filtered.length) return [0];
-    const used = new Set([0]);
+    const s = new Set();
     filtered.forEach(r=>{
-      // SPECIFIC (col M) rows are flat — base price column only, no break columns
-      if (r.topSource === PRICE_SOURCE.SPECIFIC) return;
-      const entry = custIdx[String(r.child_id)];
-      if (!entry) return;
-      // Collect breaks that have a real entry in the source arrays
-      const realBreaks = new Set();
-      entry.ratio.forEach(x=>{ if(x.price>0) realBreaks.add(x.qty_break); });
-      (entry.specific[String(custId)]||[]).forEach(x=>{ if(x.price>0) realBreaks.add(x.qty_break); });
-      entry.wl3.forEach(x=>{ if(x.price>0) realBreaks.add(x.qty_break); });
-      // Only expose breaks >0 that are both real AND in custBreaks (no sentinels)
-      realBreaks.forEach(q=>{ if(q>1) used.add(q); });
+      Object.keys(r.prices).map(Number).forEach(q=>s.add(q));
     });
-    return custBreaks.filter(q=>used.has(q));
-  },[filtered, custBreaks, custIdx, custId]);
+    return [...s].sort((a,b)=>a-b);
+  },[filtered]);
 
   let lastCat=null;
   const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
@@ -1904,7 +1919,7 @@ function CustomerView({ allData, caps }) {
     const payload=filtered.map(r=>({
       child_sku:r.child_sku,parent_sku:r.parent_sku,parent_name:r.parent_name,
       variant_name:r.variant_name,category:r.category,price_source:r.topSource,
-      prices:Object.fromEntries(custBreaks.filter(q=>r.prices[q]?.price!=null).map(q=>[q,r.prices[q].price])),
+      prices:Object.fromEntries(Object.keys(r.prices).map(Number).map(q=>[q,r.prices[q].price])),
     }));
     downloadJSON(`${cust.name.replace(/\s+/g,"-")}-prices.json`, payload);
   }
