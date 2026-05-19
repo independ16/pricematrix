@@ -1872,15 +1872,17 @@ function CustomerView({ allData, caps }) {
     if (!filtered.length) return custBreaks;
     // Always include qty=0 (base price column)
     const used = new Set([0]);
+    // For each row, walk breaks in order and only mark a break as needed
+    // if the price at that break differs from the price at the previous *used* break
     filtered.forEach(r=>{
+      // SPECIFIC (col M) rows are flat price — only show base column, no break columns
+      if (r.topSource === PRICE_SOURCE.SPECIFIC) return;
       let prevPrice = r.prices[0]?.price ?? null;
       custBreaks.forEach(q=>{
         if (q === 0) return;
         const p = r.prices[q]?.price ?? null;
-        // Show column if: SPECIFIC source shows price only at qty=0 break (flat price)
-        // or price exists and differs from previous break
-        if (p != null && p !== prevPrice) used.add(q);
-        if (p != null) prevPrice = p;
+        if (p != null && p !== prevPrice) { used.add(q); prevPrice = p; }
+        else if (p != null && p === prevPrice) { /* same price — skip column */ }
       });
     });
     return custBreaks.filter(q=>used.has(q));
