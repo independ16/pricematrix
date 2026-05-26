@@ -1762,24 +1762,37 @@ function computeCustomerFlags(rows, allData) {
 
     const basePrice = row.prices[breaks[0]]?.price ?? 0;
     if (basePrice === 0) {
-      flags.push("Zero price");
+      flags.push("Missing price");
     } else {
       if (rp.retail > 0 && basePrice > rp.retail) {
         flags.push(`Above retail (${fmt(rp.retail)})`);
-      } else if (row.topSource !== PRICE_SOURCE.WL3 && rp.wholesale > 0 && basePrice > rp.wholesale) {
-        // WL3 is intentionally above Wholesale — only flag SPECIFIC and RATIO rows
+      } else if (rp.wholesale > 0 && basePrice > rp.wholesale) {
         flags.push(`Above wholesale (${fmt(rp.wholesale)})`);
       }
     }
 
-    // Price should not rise with qty
+    // Qty ladder: price should not rise with qty
     for (let i = 1; i < breaks.length; i++) {
       const p0 = row.prices[breaks[i - 1]]?.price;
       const p1 = row.prices[breaks[i]]?.price;
       if (p0 != null && p1 != null && p1 > p0) {
-        flags.push(`Price rises at qty ${breaks[i]}`);
+        flags.push(`Qty ladder: price rises at qty ${breaks[i]}`);
         break;
       }
+    }
+
+    // Price outlier: any break >40% from median (requires 3+ data points)
+    const positivePrices = breaks.map(q => row.prices[q]?.price).filter(p => p > 0);
+    if (positivePrices.length >= 3) {
+      const sorted = [...positivePrices].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      const median = sorted.length % 2 === 0 ? (sorted[mid-1] + sorted[mid]) / 2 : sorted[mid];
+      breaks.forEach(q => {
+        const p = row.prices[q]?.price;
+        if (p > 0 && Math.abs(p - median) / median > 0.40) {
+          flags.push(`Price outlier at qty ${q}: ${fmt(p)} (median ${fmt(median)})`);
+        }
+      });
     }
 
     if (flags.length > 0) flagMap[row.child_id] = flags;
