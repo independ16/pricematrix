@@ -1764,8 +1764,12 @@ function computeCustomerFlags(rows, allData) {
     if (basePrice === 0) {
       flags.push("Zero price");
     } else {
-      if (rp.retail  > 0 && basePrice > rp.retail)     flags.push(`Above retail (${fmt(rp.retail)})`);
-      else if (rp.wholesale > 0 && basePrice > rp.wholesale) flags.push(`Above wholesale (${fmt(rp.wholesale)})`);
+      if (rp.retail > 0 && basePrice > rp.retail) {
+        flags.push(`Above retail (${fmt(rp.retail)})`);
+      } else if (row.topSource !== PRICE_SOURCE.WL3 && rp.wholesale > 0 && basePrice > rp.wholesale) {
+        // WL3 is intentionally above Wholesale — only flag SPECIFIC and RATIO rows
+        flags.push(`Above wholesale (${fmt(rp.wholesale)})`);
+      }
     }
 
     // Price should not rise with qty
@@ -1801,6 +1805,7 @@ function CustomerView({ allData, caps }) {
   const [search,      setSearch]      = useState("");
   const [selCats,     setSelCats]     = useState(new Set(["All"]));
   const [srcFilter,   setSrcFilter]   = useState("all");
+  const [showFlagged, setShowFlagged] = useState(false);
   const [catOpen,     setCatOpen]     = useState(false);
 
   // Set initial customer once data loads
@@ -1916,7 +1921,8 @@ function CustomerView({ allData, caps }) {
     });
   },[custId,custIdx,allData]);
 
-  const custFlagMap = useMemo(()=>computeCustomerFlags(rows, allData),[rows, allData]);
+  const custFlagMap   = useMemo(()=>computeCustomerFlags(rows, allData),[rows, allData]);
+  const flaggedCount  = useMemo(()=>rows.filter(r=>custFlagMap[r.child_id]?.length>0).length,[rows,custFlagMap]);
 
   const filtered = useMemo(()=>{
     let list=rows;
@@ -1925,8 +1931,9 @@ function CustomerView({ allData, caps }) {
     if (srcFilter==="ratio")    list=list.filter(r=>r.topSource===PRICE_SOURCE.RATIO);
     if (srcFilter==="wl3")      list=list.filter(r=>r.topSource===PRICE_SOURCE.WL3);
     if (search){ const q=search.toLowerCase(); list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q)); }
+    if (showFlagged) list=list.filter(r=>custFlagMap[r.child_id]?.length>0);
     return list;
-  },[rows,allCatsSelected,selCats,srcFilter,search]);
+  },[rows,allCatsSelected,selCats,srcFilter,search,showFlagged,custFlagMap]);
 
   // Derive visible breaks from Object.keys — only real entries exist in prices now
   const visibleBreaks = useMemo(()=>{
@@ -1998,6 +2005,12 @@ function CustomerView({ allData, caps }) {
           <option value="wl3">Standard WL3 Price</option>
         </select>
         <input className="inp no-print" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
+        {flaggedCount>0&&(
+          <button className="btn no-print" onClick={()=>setShowFlagged(p=>!p)}
+            style={showFlagged?{borderColor:"var(--err)",color:"var(--err)",background:"var(--err-bg)"}:{}}>
+            ▲ {flaggedCount} flagged
+          </button>
+        )}
         <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} prices</span>
         <button className="btn btn-a no-print" onClick={e=>{e.stopPropagation();window.print();}}>⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
