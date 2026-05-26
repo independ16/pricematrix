@@ -114,7 +114,7 @@ const PRICE_SOURCE = { SPECIFIC: "specific", RATIO: "ratio", WL3: "wl3" };
 const CUSTOMER_NAMES = {
   "425":  "PAVCO Furniture, Inc.",
   "483":  "A&K Enterprise of Manatee",
-  "418":  "Florida Patio",
+  "418":  "Florida Patio / Alumatech",
   "441":  "Leisure Furniture",
   "601":  "Alumatech",
 };
@@ -1170,7 +1170,7 @@ function UserManagementModal({ onClose, currentUser }) {
             )}
             <div style={{fontSize:10,color:"var(--t3)",fontFamily:"var(--fm)",lineHeight:1.6,marginTop:4}}>
               To remove a user or change their role, visit the{" "}
-              <a href="https://supabase.com/dashboard/project/yhtztcldtliugjaizrdyzu/auth/users"
+              <a href="https://supabase.com/dashboard/project/lhtkmuvfiqbnkppwvsjj/auth/users"
                 target="_blank" rel="noopener noreferrer" style={{color:"var(--brand)"}}>
                 Supabase dashboard
               </a>.
@@ -1380,7 +1380,7 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
             {sizeOptions.map(s=><option key={s} value={s}>{s==="All"?"All Sizes":s}</option>)}
           </select>
           <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",marginLeft:"auto"}}>
-            {visibleVariants.length} of {variants.length} variants
+            {visibleVariants.length} of {variants.length} prices
           </span>
         </div>
       )}
@@ -1676,7 +1676,7 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
           ))}
         </div>
         <input className="inp" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> variants</span>
+        <span className="sheet-cnt" style={{marginLeft:"auto"}}><span>{rows.length}</span> prices</span>
         <button className="btn btn-a no-print" onClick={()=>window.print()} title="Print or save as PDF">⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportCSV  && <button className="btn btn-o" onClick={handleXLSX}>↓ XLSX</button>}
@@ -1741,6 +1741,46 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
       </div>
     </div>
   );
+}
+
+// ─── CUSTOMER PRICING FLAGS ───────────────────────────────────────────────────
+function computeCustomerFlags(rows, allData) {
+  // Build reference prices per child_id from master tier rows
+  const ref = {};
+  allData.forEach(r => {
+    if (r.qty_break !== 0 || r.customer_id != null) return;
+    if (r.tier === "Retail")     (ref[r.child_id] ??= {}).retail    = r.price;
+    if (r.tier === "Wholesale")  (ref[r.child_id] ??= {}).wholesale = r.price;
+  });
+
+  const flagMap = {};
+  rows.forEach(row => {
+    const flags = [];
+    const rp = ref[row.child_id] || {};
+    const breaks = Object.keys(row.prices).map(Number).sort((a, b) => a - b);
+    if (breaks.length === 0) return;
+
+    const basePrice = row.prices[breaks[0]]?.price ?? 0;
+    if (basePrice === 0) {
+      flags.push("Zero price");
+    } else {
+      if (rp.retail  > 0 && basePrice > rp.retail)     flags.push(`Above retail (${fmt(rp.retail)})`);
+      else if (rp.wholesale > 0 && basePrice > rp.wholesale) flags.push(`Above wholesale (${fmt(rp.wholesale)})`);
+    }
+
+    // Price should not rise with qty
+    for (let i = 1; i < breaks.length; i++) {
+      const p0 = row.prices[breaks[i - 1]]?.price;
+      const p1 = row.prices[breaks[i]]?.price;
+      if (p0 != null && p1 != null && p1 > p0) {
+        flags.push(`Price rises at qty ${breaks[i]}`);
+        break;
+      }
+    }
+
+    if (flags.length > 0) flagMap[row.child_id] = flags;
+  });
+  return flagMap;
 }
 
 // ─── CUSTOMER VIEW ────────────────────────────────────────────────────────────
@@ -1876,6 +1916,8 @@ function CustomerView({ allData, caps }) {
     });
   },[custId,custIdx,allData]);
 
+  const custFlagMap = useMemo(()=>computeCustomerFlags(rows, allData),[rows, allData]);
+
   const filtered = useMemo(()=>{
     let list=rows;
     if (!allCatsSelected) list=list.filter(r=>selCats.has(r.category));
@@ -1956,7 +1998,7 @@ function CustomerView({ allData, caps }) {
           <option value="wl3">Standard WL3 Price</option>
         </select>
         <input className="inp no-print" style={{width:160}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} variants</span>
+        <span style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)",whiteSpace:"nowrap"}} className="no-print">{filtered.length} prices</span>
         <button className="btn btn-a no-print" onClick={e=>{e.stopPropagation();window.print();}}>⊞ Print / PDF</button>
         {caps.canExportCSV  && <button className="btn btn-o no-print" onClick={handleCSV}>↓ CSV</button>}
         {caps.canExportJSON && <button className="btn btn-o no-print" onClick={handleJSON}>↓ JSON</button>}
@@ -1992,6 +2034,11 @@ function CustomerView({ allData, caps }) {
                       {r.topSource===PRICE_SOURCE.SPECIFIC&&<span className="src-badge-specific">CUSTOM</span>}
                       {r.topSource===PRICE_SOURCE.RATIO&&<span className="src-badge-ratio">TIER</span>}
                       {r.topSource===PRICE_SOURCE.WL3&&<span className="src-badge-wl3">WL3</span>}
+                      {custFlagMap[r.child_id]?.length>0&&(
+                        <span className="flag-row-badge no-print" title={custFlagMap[r.child_id].join("\n")}>
+                          ▲{custFlagMap[r.child_id].length}
+                        </span>
+                      )}
                     </div>
                     {r.variant_name!=="Simple"&&<div className="s-var">{r.variant_name}</div>}
                   </td>
@@ -2020,130 +2067,6 @@ function CustomerView({ allData, caps }) {
   );
 }
 
-// ─── FLAGS VIEW (REMOVED) — flag filtering is now a dropdown inside Browse ─────
-function _FlagsView_REMOVED({ allData, onSelectProduct }) {
-  const [loading,     setLoading]     = useState(true);
-  const [flagResults, setFlagResults] = useState([]);
-  const [filterType,  setFilterType]  = useState("all");
-  const [search,      setSearch]      = useState("");
-
-  useEffect(()=>{
-    if (!allData.length) return;
-    setLoading(true);
-    // Run in a timeout so UI can render the spinner first
-    const t = setTimeout(()=>{
-      const results = computeRedFlags(allData);
-      setFlagResults(results);
-      setLoading(false);
-    }, 50);
-    return ()=>clearTimeout(t);
-  },[allData]);
-
-  const FLAG_TYPES = [
-    { id:"all",          label:"All flags" },
-    { id:"price_zero",   label:"Missing price" },
-    { id:"tier_order",   label:"Tier order" },
-    { id:"qty_ladder",   label:"Qty ladder" },
-    { id:"sentinel",     label:"Sentinel mismatch" },
-    { id:"outlier",      label:"Price outlier" },
-    { id:"image",        label:"Image" },
-    { id:"category",     label:"Category" },
-    { id:"variant",      label:"Variants" },
-    { id:"sku_dupe",     label:"Dup SKU" },
-  ];
-
-  const filterMap = {
-    price_zero: f => f.includes("Missing or zero"),
-    tier_order: f => f.includes("tier order violated") || f.includes("tier violated"),
-    qty_ladder: f => f.includes("price increases at qty"),
-    sentinel:   f => f.includes("sentinel"),
-    outlier:    f => f.includes("Possible price typo"),
-    image:      f => f.includes("image"),
-    category:   f => f.includes("Uncategorized"),
-    variant:    f => f.includes("variant"),
-    sku_dupe:   f => f.includes("child SKU"),
-  };
-
-  const filtered = useMemo(()=>{
-    let list = flagResults;
-    if (filterType!=="all") {
-      const fn = filterMap[filterType];
-      list = list.filter(r => fn && r.flags.some(fn));
-    }
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(r =>
-        r.parent_name?.toLowerCase().includes(q) ||
-        r.parent_sku?.toLowerCase().includes(q) ||
-        r.flags.some(f=>f.toLowerCase().includes(q))
-      );
-    }
-    return list;
-  },[flagResults,filterType,search]);
-
-  if (loading) return (
-    <div className="loading-wrap">
-      <div className="spinner"/>
-      <div style={{fontFamily:"var(--fm)",fontSize:11,color:"var(--t3)"}}>Analyzing {allData.length.toLocaleString()} rows…</div>
-    </div>
-  );
-
-  const totalFlaggedProducts = flagResults.length;
-  const totalFlags = flagResults.reduce((s,r)=>s+r.flags.length,0);
-
-  return (
-    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-      {/* Toolbar */}
-      <div className="sheet-bar">
-        <div style={{fontFamily:"var(--fd)",fontWeight:700,fontSize:13,color:"var(--err)"}}>
-          ▲ Data Flags
-        </div>
-        <div style={{fontFamily:"var(--fm)",fontSize:10,color:"var(--t3)"}}>
-          <span style={{color:"var(--err)",fontWeight:700}}>{totalFlaggedProducts}</span> products · <span style={{color:"var(--err)",fontWeight:700}}>{totalFlags}</span> issues
-        </div>
-        <div className="divider"/>
-        <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
-          {FLAG_TYPES.map(ft=>(
-            <button key={ft.id} className="tier-pill"
-              style={filterType===ft.id?{borderColor:"var(--err)",color:"var(--err)",background:"var(--err-bg)"}:{}}
-              onClick={()=>setFilterType(ft.id)}>{ft.label}</button>
-          ))}
-        </div>
-        <input className="inp" style={{width:160,marginLeft:"auto"}} placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <span className="sheet-cnt"><span>{filtered.length}</span> products</span>
-      </div>
-
-      {/* Results */}
-      <div style={{flex:1,overflow:"auto",padding:14,display:"flex",flexDirection:"column",gap:8}}>
-        {filtered.length===0 && (
-          <div className="empty"><h3>No flags match this filter</h3><p>Try "All flags" to see everything</p></div>
-        )}
-        {filtered.map(r=>(
-          <div key={r.parent_id}
-            style={{background:"var(--s1)",border:"1px solid var(--b1)",borderRadius:8,padding:"10px 14px",cursor:"pointer",transition:"border-color .15s,box-shadow .15s"}}
-            onClick={()=>onSelectProduct(r)}
-            onMouseEnter={e=>{e.currentTarget.style.borderColor="var(--err)";e.currentTarget.style.boxShadow="0 0 0 2px var(--err-bg)";}}
-            onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--b1)";e.currentTarget.style.boxShadow="none";}}>
-            <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:6}}>
-              <span className="flag-badge">{r.flags.length}</span>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontFamily:"var(--fd)",fontWeight:600,fontSize:12,color:"var(--text)",marginBottom:1}}>{r.parent_name}</div>
-                <div style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)"}}>
-                  {r.parent_sku} · {r.category}
-                </div>
-              </div>
-            </div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-              {r.flags.map((f,i)=>(
-                <span key={i} className="flag-row-badge">{f}</span>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ─── FLAG INFO TOOLTIP ────────────────────────────────────────────────────────
 const FLAG_DESCRIPTIONS = [
@@ -2236,7 +2159,6 @@ export default function App() {
   const [sortBy,       setSortBy]       = useState("name");
   const [selectedProd, setSelectedProd] = useState(null);
   const [focusChildSku,setFocusChildSku]= useState(null);
-  const [flagFilter,    setFlagFilter]    = useState(false);
   // "none" = no flag filter, or one of the FLAG_TYPE ids
   const [flagTypeFilter, setFlagTypeFilter] = useState("none");
   const selectedCardRef = useRef(null);
@@ -2399,7 +2321,6 @@ export default function App() {
         [...(childSkuMap[p.parent_id]||[])].some(sku=>sku.toLowerCase().includes(q))
       );
     }
-    if(flagFilter) list=list.filter(p=>flaggedParentIds.has(p.parent_id));
     if(flagTypeFilter!=="none") {
       const matchFn = FLAG_FILTER_MATCH[flagTypeFilter];
       list=list.filter(p=>{
@@ -2413,7 +2334,7 @@ export default function App() {
       if(sortBy==="cat")  return a.category.localeCompare(b.category);
       return 0;
     });
-  },[allProducts,childSkuMap,category,search,sortBy,flagFilter,flagTypeFilter,flaggedParentIds,flagMap]);
+  },[allProducts,childSkuMap,category,search,sortBy,flagTypeFilter,flaggedParentIds,flagMap]);
 
   useEffect(()=>{
     if(search&&filtered.length===1){
@@ -2512,7 +2433,7 @@ export default function App() {
           return (
             <div className={`data-stats no-print${staleCls}`}
               title={dataStats.lastUpdated ? `Last updated: ${fmt.format(dataStats.lastUpdated)}` : ""}>
-              <span><span className="ds-val">{dataStats.variantCount.toLocaleString()}</span> variants</span>
+              <span><span className="ds-val">{dataStats.variantCount.toLocaleString()}</span> prices</span>
               {dataStats.lastUpdated && <>
                 <span className="ds-sep"> · </span>
                 <span className="ds-date">Updated <span className="ds-val">{fmt.format(dataStats.lastUpdated)}</span></span>
