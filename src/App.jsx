@@ -248,7 +248,8 @@ function getTierFlat(data, tier) {
     });
     Object.keys(m).forEach(sku => {
       const ws = wsFlat[sku] || {};
-      Object.keys(ws).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1).forEach(b => {
+      const maxOwn = Math.max(0, ...Object.keys(m[sku]).map(Number).filter(b => b !== 1));
+      Object.keys(ws).filter(k => !isNaN(k)).map(Number).filter(b => b !== 1 && b <= maxOwn).forEach(b => {
         if (!m[sku][b] && ws[b]) {
           m[sku][b] = ws[b];
         }
@@ -1911,9 +1912,12 @@ function CustomerView({ allData, caps }) {
       const prices = {};
       if (topSource === PRICE_SOURCE.SPECIFIC) {
         const specArr = entry.specific[String(custId)] || [];
-        const base = specArr.find(x=>x.qty_break===0 && x.price>0)
-                  || specArr.find(x=>x.price>0);
-        if (base) prices[0] = { price: base.price, source: PRICE_SOURCE.SPECIFIC };
+        specArr.forEach(x => {
+          if (x.price > 0) {
+            const qb = x.qty_break === 1 ? 0 : x.qty_break;
+            prices[qb] ??= { price: x.price, source: PRICE_SOURCE.SPECIFIC };
+          }
+        });
       } else {
         const srcArr = topSource === PRICE_SOURCE.RATIO ? entry.ratio : entry.wl3;
         const srcLabel = topSource === PRICE_SOURCE.RATIO ? PRICE_SOURCE.RATIO : PRICE_SOURCE.WL3;
