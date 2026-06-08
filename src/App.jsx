@@ -264,6 +264,12 @@ function getTierFlat(data, tier) {
 function resolveWLPrice(matrix, childId, tier, qb) {
   const actual = matrix[childId]?.[tier]?.[qb];
   if (actual) return actual;
+  // For WL3: don't fill beyond WL3's own highest break
+  if (tier === "Wholesale_L3") {
+    const ownBreaks = Object.keys(matrix[childId]?.[tier] || {}).map(Number).filter(b => b !== 1);
+    const maxOwn = ownBreaks.length ? Math.max(...ownBreaks) : 0;
+    if (qb > maxOwn) return null;
+  }
   return matrix[childId]?.Wholesale?.[qb] ?? null;
 }
 
