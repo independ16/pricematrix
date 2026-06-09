@@ -299,20 +299,28 @@ function pctVsWholesale(price, wsPrice) {
 function buildCustomerIndex(data) {
   // Index structure:
   //   idx[child_id] = {
-  //     specific: { [customer_id]: [{ qty_break, price }, ...] },  // Customer_Specific_Pricing rows
-  //     ratio:    [{ qty_break, price }, ...],                      // Customer tier, customer_id blank
-  //     wl3:      [{ qty_break, price }, ...],                      // Wholesale_L3 fallback
+  //     specific:  { [customer_id]: [{ qty_break, price }, ...] },  // Customer_Specific_Pricing rows (hand-set unit prices)
+  //     custRatio: { [customer_id]: [{ qty_break, price }, ...] },  // Staging rows with a customer_id (e.g. FL Patio 418)
+  //     ratio:     [{ qty_break, price }, ...],                      // Staging rows, customer_id blank (generic ratio)
+  //     wl3:       [{ qty_break, price }, ...],                      // Wholesale_L3 fallback
   //   }
   const idx = {};
   data.forEach(r => {
     if (Number(r.qty_break) === 1 && r.tier !== "Customer") return; // skip sentinel (preserve col M customer rows)
     const cid = String(r.child_id);
-    idx[cid] ??= { specific: {}, ratio: [], wl3: [] };
+    idx[cid] ??= { specific: {}, custRatio: {}, ratio: [], wl3: [] };
     if (r.tier === "Customer") {
       const custId = String(r.customer_id ?? "").trim();
       if (custId !== "") {
-        idx[cid].specific[custId] ??= [];
-        idx[cid].specific[custId].push({ qty_break: Number(r.qty_break), price: Number(r.price) });
+        if (r._src === "ratio") {
+          // Staging row with a customer_id — treat as ratio pricing, not a hand-set specific price
+          idx[cid].custRatio[custId] ??= [];
+          idx[cid].custRatio[custId].push({ qty_break: Number(r.qty_break), price: Number(r.price) });
+        } else {
+          // Customer_Specific_Pricing row — genuine hand-set unit price
+          idx[cid].specific[custId] ??= [];
+          idx[cid].specific[custId].push({ qty_break: Number(r.qty_break), price: Number(r.price) });
+        }
       } else {
         idx[cid].ratio.push({ qty_break: Number(r.qty_break), price: Number(r.price) });
       }
@@ -323,6 +331,7 @@ function buildCustomerIndex(data) {
   // Sort all break arrays descending for lookup
   Object.values(idx).forEach(entry => {
     Object.values(entry.specific).forEach(arr => arr.sort((a,b) => b.qty_break - a.qty_break));
+    Object.values(entry.custRatio).forEach(arr => arr.sort((a,b) => b.qty_break - a.qty_break));
     entry.ratio.sort((a,b) => b.qty_break - a.qty_break);
     entry.wl3.sort((a,b) => b.qty_break - a.qty_break);
   });
@@ -345,7 +354,13 @@ function resolveCustomerPrice(idx, childId, customerId, qty) {
     const price = resolve(specArr);
     if (price != null) return { price, source: PRICE_SOURCE.SPECIFIC };
   }
-  // 2. Generic ratio fallback (Customer_Pricing_Ratio_STAGING tab, customer_id blank)
+  // 2. Customer ratio (staging rows with this customer's ID, e.g. FL Patio 418)
+  const custRatioArr = entry.custRatio[String(customerId)];
+  if (custRatioArr?.length) {
+    const price = resolve(custRatioArr);
+    if (price != null) return { price, source: PRICE_SOURCE.RATIO };
+  }
+  // 3. Generic ratio fallback (Customer_Pricing_Ratio_STAGING tab, customer_id blank)
   if (entry.ratio.length) {
     const price = resolve(entry.ratio);
     if (price != null) return { price, source: PRICE_SOURCE.RATIO };
@@ -1902,11 +1917,13 @@ function CustomerView({ allData, caps }) {
       const entry = custIdx[childId];
       if (!entry) return;
 
-      const hasSpecific = (entry.specific[String(custId)]||[]).some(x=>x.price>0);
-      const hasRatio    = entry.ratio.some(x=>x.price>0);
-      const hasWl3      = entry.wl3.some(x=>x.price>0);
+      const hasSpecific  = (entry.specific[String(custId)]||[]).some(x=>x.price>0);
+      const hasCustRatio = (entry.custRatio[String(custId)]||[]).some(x=>x.price>0);
+      const hasRatio     = entry.ratio.some(x=>x.price>0);
+      const hasWl3       = entry.wl3.some(x=>x.price>0);
       let topSource = null;
-      if (hasSpecific) topSource = PRICE_SOURCE.SPECIFIC;
+      if (hasSpecific)  topSource = PRICE_SOURCE.SPECIFIC;
+      else if (hasCustRatio) topSource = PRICE_SOURCE.RATIO;
       else if (hasRatio) topSource = PRICE_SOURCE.RATIO;
       else if (hasWl3)  topSource = PRICE_SOURCE.WL3;
       if (topSource === null) return;
@@ -1925,7 +1942,9 @@ function CustomerView({ allData, caps }) {
           }
         });
       } else {
-        const srcArr = topSource === PRICE_SOURCE.RATIO ? entry.ratio : entry.wl3;
+        const srcArr = topSource === PRICE_SOURCE.RATIO
+          ? ((entry.custRatio[String(custId)]||[]).length ? entry.custRatio[String(custId)] : entry.ratio)
+          : entry.wl3;
         const srcLabel = topSource === PRICE_SOURCE.RATIO ? PRICE_SOURCE.RATIO : PRICE_SOURCE.WL3;
         srcArr.forEach(x=>{
           if (x.price > 0 && x.qty_break !== 1) {

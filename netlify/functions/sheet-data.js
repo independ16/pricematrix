@@ -76,8 +76,8 @@ exports.handler = async function (event, context) {
     ]);
 
     const masterData   = parseSheet(masterResp.data.values);
-    const ratioData    = parseSheet(ratioResp.data.values);
-    const specificData = parseSheet(specificResp.data.values);
+    const ratioData    = parseSheet(ratioResp.data.values).map(r => ({ ...r, _src: "ratio" }));
+    const specificData = parseSheet(specificResp.data.values).map(r => ({ ...r, _src: "specific" }));
 
     // Concatenate — master first, then customer pricing rows
     const data = [...masterData, ...ratioData, ...specificData];
