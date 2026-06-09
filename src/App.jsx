@@ -119,6 +119,10 @@ const CUSTOMER_NAMES = {
   "601":  "Alumatech",
 };
 
+// Customers who receive generic ratio pricing (blank customer_id staging rows)
+// for SKUs without a hand-set specific price. All others fall through to WL3.
+const RATIO_CUSTOMERS = new Set(["425", "483"]);
+
 // ─── PASSWORD SET GATE ───────────────────────────────────────────────────────
 // Shown when the app is opened via a Supabase recovery/invite link.
 // The URL hash contains an access_token with type=recovery or type=invite.
@@ -360,8 +364,8 @@ function resolveCustomerPrice(idx, childId, customerId, qty) {
     const price = resolve(custRatioArr);
     if (price != null) return { price, source: PRICE_SOURCE.RATIO };
   }
-  // 3. Generic ratio fallback (Customer_Pricing_Ratio_STAGING tab, customer_id blank)
-  if (entry.ratio.length) {
+  // 3. Generic ratio fallback — only for customers who receive ratio pricing
+  if (RATIO_CUSTOMERS.has(String(customerId)) && entry.ratio.length) {
     const price = resolve(entry.ratio);
     if (price != null) return { price, source: PRICE_SOURCE.RATIO };
   }
@@ -1919,13 +1923,13 @@ function CustomerView({ allData, caps }) {
 
       const hasSpecific  = (entry.specific[String(custId)]||[]).some(x=>x.price>0);
       const hasCustRatio = (entry.custRatio[String(custId)]||[]).some(x=>x.price>0);
-      const hasRatio     = entry.ratio.some(x=>x.price>0);
+      const hasRatio     = RATIO_CUSTOMERS.has(String(custId)) && entry.ratio.some(x=>x.price>0);
       const hasWl3       = entry.wl3.some(x=>x.price>0);
       let topSource = null;
-      if (hasSpecific)  topSource = PRICE_SOURCE.SPECIFIC;
+      if (hasSpecific)       topSource = PRICE_SOURCE.SPECIFIC;
       else if (hasCustRatio) topSource = PRICE_SOURCE.RATIO;
-      else if (hasRatio) topSource = PRICE_SOURCE.RATIO;
-      else if (hasWl3)  topSource = PRICE_SOURCE.WL3;
+      else if (hasRatio)     topSource = PRICE_SOURCE.RATIO;
+      else if (hasWl3)       topSource = PRICE_SOURCE.WL3;
       if (topSource === null) return;
       if (topSource === PRICE_SOURCE.WL3) {
         const nameLower = v.parent_name.toLowerCase();
