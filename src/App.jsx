@@ -121,7 +121,7 @@ const CUSTOMER_NAMES = {
 
 // Customers who receive generic ratio pricing (blank customer_id staging rows)
 // for SKUs without a hand-set specific price. All others fall through to WL3.
-const RATIO_CUSTOMERS = new Set(["425", "483"]);
+const RATIO_CUSTOMERS = new Set(["483"]);
 
 // ─── PASSWORD SET GATE ───────────────────────────────────────────────────────
 // Shown when the app is opened via a Supabase recovery/invite link.
