@@ -1538,6 +1538,24 @@ function DetailPanel({ product, visibleTiers, onClose, allData, focusChildSku, c
   );
 }
 
+// ─── SEARCH HELPER ────────────────────────────────────────────────────────────
+// Supports: plain substring, * (any chars), ? (single char), implicit AND
+// (space-separated tokens all must match), explicit OR with |.
+// Special regex chars in the query are escaped before glob expansion.
+function buildSearchMatcher(query) {
+  if (!query) return null;
+  const escape = s => s.replace(/[.+^${}()\[\]\\]/g, "\\$&");
+  const globToRegex = token =>
+    new RegExp(token.split("*").map(p => p.split("?").map(escape).join(".")).join(".*"), "i");
+  // Space-separated → AND; pipe-separated within a token → OR
+  const andTokens = query.trim().split(/\s+/);
+  const matchers = andTokens.map(tok => {
+    const orParts = tok.split("|").map(globToRegex);
+    return str => orParts.some(re => re.test(str));
+  });
+  return fields => matchers.every(m => fields.some(f => m(f)));
+}
+
 // ─── SHEET VIEW ───────────────────────────────────────────────────────────────
 function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCategories }) {
   const [tier,   setTier]   = useState(visibleTiers[0]||"Wholesale");
@@ -1552,10 +1570,8 @@ function SheetView({ visibleTiers, allData, caps, excluded, setExcluded, allCate
     let entries = Object.entries(data);
     if (!search) entries = entries.filter(([,v])=>!excluded.has(v.category));
     if (search) {
-      const q=search.toLowerCase();
-      entries=entries.filter(([sku,v])=>
-        v.parent_name.toLowerCase().includes(q)||sku.toLowerCase().includes(q)||v.parent_sku.toLowerCase().includes(q)
-      );
+      const match = buildSearchMatcher(search);
+      entries=entries.filter(([sku,v])=>match([v.parent_name,sku,v.parent_sku]));
     }
     return entries.sort((a,b)=>{
       if(a[1].category!==b[1].category) return a[1].category.localeCompare(b[1].category);
@@ -1976,7 +1992,7 @@ function CustomerView({ allData, caps }) {
     if (srcFilter==="specific") list=list.filter(r=>r.topSource===PRICE_SOURCE.SPECIFIC);
     if (srcFilter==="ratio")    list=list.filter(r=>r.topSource===PRICE_SOURCE.RATIO);
     if (srcFilter==="wl3")      list=list.filter(r=>r.topSource===PRICE_SOURCE.WL3);
-    if (search){ const q=search.toLowerCase(); list=list.filter(r=>r.parent_name.toLowerCase().includes(q)||r.child_sku.toLowerCase().includes(q)||r.category.toLowerCase().includes(q)); }
+    if (search){ const match=buildSearchMatcher(search); list=list.filter(r=>match([r.parent_name,r.child_sku,r.category])); }
     if (showFlagged) list=list.filter(r=>custFlagMap[r.child_id]?.length>0);
     return list;
   },[rows,allCatsSelected,selCats,srcFilter,search,showFlagged,custFlagMap]);
@@ -2373,12 +2389,8 @@ export default function App() {
     const effectiveCat = search?"All":category;
     if(effectiveCat!=="All") list=list.filter(p=>p.category===effectiveCat);
     if(search){
-      const q=search.toLowerCase();
-      list=list.filter(p=>
-        p.parent_name.toLowerCase().includes(q)||
-        p.parent_sku.toLowerCase().includes(q)||
-        [...(childSkuMap[p.parent_id]||[])].some(sku=>sku.toLowerCase().includes(q))
-      );
+      const match=buildSearchMatcher(search);
+      list=list.filter(p=>match([p.parent_name,p.parent_sku,...(childSkuMap[p.parent_id]||[])]));
     }
     if(flagTypeFilter!=="none") {
       const matchFn = FLAG_FILTER_MATCH[flagTypeFilter];
@@ -2397,9 +2409,9 @@ export default function App() {
 
   useEffect(()=>{
     if(search&&filtered.length===1){
-      const q=search.toLowerCase();
+      const match=buildSearchMatcher(search);
       setSelectedProd(filtered[0]);
-      const matchingSku=[...(childSkuMap[filtered[0].parent_id]||[])].find(sku=>sku.toLowerCase().includes(q));
+      const matchingSku=[...(childSkuMap[filtered[0].parent_id]||[])].find(sku=>match([sku]));
       setFocusChildSku(matchingSku||null);
     } else if(!search){ setFocusChildSku(null); }
   },[search,filtered]);
