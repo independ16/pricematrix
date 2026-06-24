@@ -79,8 +79,38 @@ exports.handler = async function (event, context) {
     const ratioData    = parseSheet(ratioResp.data.values).map(r => ({ ...r, _src: "ratio" }));
     const specificData = parseSheet(specificResp.data.values).map(r => ({ ...r, _src: "specific" }));
 
+    // Build lookup maps from master so customer pricing rows always carry
+    // current SKUs, names, images, and slugs — even when the WC SKUs change.
+    // Rows whose parent_id or child_id has no match in master are dropped.
+    const masterByParent = new Map();
+    const masterByChild  = new Map();
+    masterData.forEach(r => {
+      if (!masterByParent.has(r.parent_id)) {
+        masterByParent.set(r.parent_id, {
+          parent_sku: r.parent_sku, parent_name: r.parent_name,
+          category: r.category, slug: r.slug, image_url: r.image_url,
+        });
+      }
+      if (!masterByChild.has(r.child_id)) {
+        masterByChild.set(r.child_id, {
+          child_sku: r.child_sku, variant_name: r.variant_name,
+        });
+      }
+    });
+
+    function normalizePricingRows(rows) {
+      const out = [];
+      rows.forEach(r => {
+        const p = masterByParent.get(r.parent_id);
+        const c = masterByChild.get(r.child_id);
+        if (!p || !c) return; // orphaned row — no match in master, drop it
+        out.push({ ...r, ...p, ...c });
+      });
+      return out;
+    }
+
     // Concatenate — master first, then customer pricing rows
-    const data = [...masterData, ...ratioData, ...specificData];
+    const data = [...masterData, ...normalizePricingRows(ratioData), ...normalizePricingRows(specificData)];
 
     const zlib = require("zlib");
     const compressed = zlib.gzipSync(JSON.stringify(data));
