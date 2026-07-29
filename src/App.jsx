@@ -860,7 +860,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .ct th,.ct td,.st th,.st td{border-color:#ddd!important;color:#000!important;background:#fff!important}
   .cat-hdr td{background:#f0f0f0!important;color:#333!important}
   .sheet{display:block!important;height:auto!important}
-  .sheet-wrap{display:none!important}
+  .sheet-wrap,.cust-wrap{display:none!important}
   .print-only{display:block!important}
   .ptw,.msec{page-break-inside:avoid!important}
 }
@@ -2004,6 +2004,19 @@ function CustomerView({ allData, caps }) {
     return [...s].sort((a,b)=>a-b);
   },[filtered]);
 
+  // Group filtered rows by category for per-category print tables (Sheet View style)
+  const printGroups = useMemo(()=>{
+    const m = new Map();
+    filtered.forEach(r=>{
+      if (!m.has(r.category)) m.set(r.category, { rows:[], breaks:new Set() });
+      const g = m.get(r.category);
+      g.rows.push(r);
+      Object.keys(r.prices).map(Number).forEach(q=>g.breaks.add(q));
+    });
+    m.forEach(g=>{ g.breaks = [...g.breaks].sort((a,b)=>a-b); });
+    return m;
+  },[filtered]);
+
   let lastCat=null;
   const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
 
@@ -2028,13 +2041,51 @@ function CustomerView({ allData, caps }) {
 
   return (
     <div className="custv" onClick={()=>catOpen&&setCatOpen(false)}>
-      <div className="print-cust-hdr">
-        <h1>Price List — {cust.name}</h1>
-        <p>Prepared {today} · Prices valid as of this date · Subject to change without notice</p>
+      {/* ── PRINT-ONLY LAYOUT: one section per category, each starts new page ── */}
+      <div className="print-only">
+        <div className="print-hdr">
+          <h1>Price List — {cust.name}</h1>
+          <p>Patio Products, Inc. · Prepared {today} · Prices subject to change without notice</p>
+        </div>
+        {[...printGroups.entries()].map(([cat, group])=>(
+          <div key={cat} className="print-cat-section">
+            <div className="print-cat-title">{cat}</div>
+            <table className="print-table">
+              <thead>
+                <tr>
+                  <th className="print-th-name">Product / Variant</th>
+                  <th className="print-th-sku">SKU</th>
+                  {group.breaks.map(q=><th key={q} className="print-th-price">{q===0?"Price":`${q}+`}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {group.rows.map(r=>{
+                  const isSpecific = r.topSource===PRICE_SOURCE.SPECIFIC;
+                  return (
+                    <tr key={r.child_id} className="print-tr">
+                      <td className="print-td-name">
+                        <div className="print-pname">{r.parent_name}</div>
+                        {r.variant_name!=="Simple"&&<div className="print-pvar">{r.variant_name}</div>}
+                      </td>
+                      <td className="print-td-sku">{r.child_sku}</td>
+                      {group.breaks.map(q=>{
+                        const isSpecificNonBase = isSpecific && q!==0;
+                        const price = r.prices[q]?.price;
+                        return (
+                          <td key={q} className="print-td-price">
+                            {!isSpecificNonBase && price!=null ? fmt(price) : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
       </div>
-      <div className="print-watermark" style={{display:"none"}}>
-        CONFIDENTIAL — Property of Patio Products, Inc. · Internal use only · Do not distribute
-      </div>
+
       <div className="cust-bar">
         <span style={{fontFamily:"var(--fm)",fontSize:9,color:"var(--t3)",textTransform:"uppercase",letterSpacing:".1em"}}>Customer</span>
         <select className="cust-sel" value={custId} onChange={e=>{setCustId(e.target.value);setSearch("");setSelCats(new Set(["All"]));setSrcFilter("all");}}>

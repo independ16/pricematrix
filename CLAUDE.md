@@ -11,7 +11,7 @@ Internal pricing tool for Patio Products, Inc. A React SPA that pulls ~43k price
 - **Prod:** https://patioproducts-pricebook.netlify.app
 
 ## Stack
-- React 18 + Vite 5, single-file app (`src/App.jsx` — currently ~2,753 lines)
+- React 18 + Vite 5, single-file app (`src/App.jsx` — currently ~2,796 lines)
 - Netlify hosting + serverless functions (`netlify/functions/`)
 - Google Sheets as data source (service account, via `sheet-data.js` function)
 - Supabase for auth (REST calls only, no SDK): `lhtkmuvfiqbnkppwvsjj.supabase.co`
@@ -40,10 +40,9 @@ Internal pricing tool for Patio Products, Inc. A React SPA that pulls ~43k price
 | 1223–1240 | PctBadge, WatermarkBar |
 | 1241–1514 | DetailPanel |
 | 1515–1745 | SheetView |
-| 1746–2022 | CustomerView |
-| 2023–2147 | _FlagsView_REMOVED (dead code — do not resurrect) |
-| 2148–2228 | FlagInfoTooltip, FLAG_DESCRIPTIONS |
-| 2229–end | Root App component (export default) |
+| 1788–1845 | computeCustomerFlags |
+| 1846–2143 | CustomerView (includes print-only per-category PDF layout, mirrors SheetView) |
+| 2197–end | FlagInfoTooltip, FLAG_DESCRIPTIONS, Root App component (export default) |
 
 ## Roles
 `admin` > `manager` > `viewer` > `commercial` / `wholesale` / `retail`
@@ -84,15 +83,14 @@ npm run build        # Production build to dist/
 ```
 
 ## Editing App.jsx — Safety Rules
-1. **Always check line count before and after edits** — expected baseline is ~2,753 lines
+1. **Always check line count before and after edits** — expected baseline is ~2,796 lines
 2. For large patches: use explicit `old_string` with enough surrounding context to guarantee unique match
 3. Never introduce `custBreaks` back into CustomerView column rendering or price resolution
-4. Dead code at ~line 2024 (`_FlagsView_REMOVED`) — leave alone until cleanup sprint
 
-## Outstanding Work (as of May 26, 2026)
+## Outstanding Work (as of July 29, 2026)
 - [x] Leisure Furniture (441): fabric-only SPECIFIC rows, no ratio workflow needed — complete
 - [ ] n8n ratio workflow: PAVCO (425) and A&K (483) only — no changes needed
-- [ ] Merge dev → main once Leisure pricing is verified on dev
+- [ ] Merge dev → main once Leisure pricing and customer PDF print fix are verified on dev
 - [x] `Customer_Specific_Pricing_with_Leisure.tsv` (417 rows) pasted into Google Sheets — dev UI confirmed reading correctly
 - [ ] Qty discount flag: flag breaks where higher-qty price < ~80-90% of qty=0 price (deferred until sentinel corrections done)
 - [ ] Patioproducts.com domain in Resend (SPF/DKIM) — eliminates Gmail warning on invite emails
@@ -101,3 +99,4 @@ npm run build        # Production build to dist/
 - [x] Customer pricing flags added to CustomerView (`computeCustomerFlags`) — no-print, hover for details
 - [x] "Florida Patio" renamed to "Florida Patio / Alumatech" (customer 418)
 - [x] "variants" → "prices" in all UI count labels
+- [x] Customer pricing PDF now splits into per-category tables (matches Sheet View) — fixes columns being cut off past ~10+ on wide qty-break spreads; verified on dev
