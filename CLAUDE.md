@@ -11,7 +11,7 @@ Internal pricing tool for Patio Products, Inc. A React SPA that pulls ~43k price
 - **Prod:** https://patioproducts-pricebook.netlify.app
 
 ## Stack
-- React 18 + Vite 5, single-file app (`src/App.jsx` — currently ~2,796 lines)
+- React 18 + Vite 5, single-file app (`src/App.jsx` — currently ~2,797 lines)
 - Netlify hosting + serverless functions (`netlify/functions/`)
 - Google Sheets as data source (service account, via `sheet-data.js` function)
 - Supabase for auth (REST calls only, no SDK): `lhtkmuvfiqbnkppwvsjj.supabase.co`
@@ -61,9 +61,9 @@ Three price sources, priority order:
 Current customers in CUSTOMER_NAMES:
 - 425: PAVCO Furniture, Inc.
 - 483: A&K Enterprise of Manatee
-- 418: Florida Patio
+- 418: Florida Patio / Alumatech — combined internal label; Florida Patio owns Alumatech, same negotiated pricing for both. As of Aug 2026, all 338 SPECIFIC rows live under `customer_id=418` only. `Customer_Pricing_Ratio_STAGING`'s old ~4,355-row formula-based data for 418 was deleted and fully replaced by curated SPECIFIC overrides — everything not explicitly overridden falls through to plain WL3.
 - 441: Leisure Furniture (added May 2026 — fabric SKUs only, SPECIFIC rows)
-- 601: Alumatech
+- 601: Alumatech — **not yet used anywhere in PriceMatrix data** (zero rows under this id → doesn't appear in the Customer dropdown). Only matters for the WooCommerce push, where Florida Patio and Alumatech are separate customer accounts needing identical pricing mirrored to both ids. See Outstanding Work.
 
 ## CustomerView Column Logic (critical — do not regress)
 - `custBreaks` memo: exists for break derivation only — NOT used for column rendering or price resolution
@@ -72,8 +72,12 @@ Current customers in CUSTOMER_NAMES:
 - colSpan on category header rows uses `visibleBreaks.length` (NOT `custBreaks.length`)
 
 ## Netlify Functions
-- `sheet-data.js` — fetches all three pricing tabs, gzips response, 5-min cache
+- `sheet-data.js` — fetches all three pricing tabs, gzips response, 5-min cache. No auth on the endpoint itself — it's a public URL (`/.netlify/functions/sheet-data`), same data the app fetches, no service-account credentials needed to read it.
 - `create-user.js`, `invite-user.js`, `set-password.js`, `get-profile.js` — Supabase user management
+
+## scripts/ (untracked, not yet committed)
+- `build-wc-customer-export.js` — builds a WooCommerce user-specific pricing import TSV from local exports of `Customer_Pricing_Ratio_STAGING` + `Customer_Specific_Pricing`. **Known bug:** only the ratio-rows loop mirrors `customer_id=418` → both `418` and `601` (Florida Patio/Alumatech); the specific-rows loop uses `row.customer_id` verbatim with no mirroring. Since all Florida Patio pricing now lives as SPECIFIC rows under 418 only (see Customer Pricing Architecture), running this script unmodified would produce a WC export with zero pricing for the Alumatech account. **Fix the specific-rows loop to mirror 418→601 before running this for the WC push.**
+- `regenerate-ratio-staging.js` — generated the old formula-based ratio pricing for 418 (superseded/deleted; not used going forward for Florida Patio, kept only as reference for the TSV column format).
 
 ## Dev Workflow
 ```
@@ -83,20 +87,18 @@ npm run build        # Production build to dist/
 ```
 
 ## Editing App.jsx — Safety Rules
-1. **Always check line count before and after edits** — expected baseline is ~2,796 lines
+1. **Always check line count before and after edits** — expected baseline is ~2,797 lines
 2. For large patches: use explicit `old_string` with enough surrounding context to guarantee unique match
 3. Never introduce `custBreaks` back into CustomerView column rendering or price resolution
 
-## Outstanding Work (as of July 29, 2026)
-- [x] Leisure Furniture (441): fabric-only SPECIFIC rows, no ratio workflow needed — complete
+## Outstanding Work (as of August 17-18, 2026)
+- [ ] **Next up: WC export/upload for customer specific pricing** (all customers pushed at once, not incremental). Fix `scripts/build-wc-customer-export.js`'s specific-rows-loop mirroring gap first (see scripts/ section above) — without it, Alumatech (601) gets zero pricing in the WC push.
+- [x] Florida Patio / Alumatech (418) pricing migration — replaced ~4,355 stale formula-based `Customer_Pricing_Ratio_STAGING` rows with 338 curated SPECIFIC rows in `Customer_Specific_Pricing`, cross-validated against the customer's clean price list and live master catalog. Verified via customer-view JSON export, zero discrepancies after one correction round (6 renamed-SKU rows had stale prices, fixed).
+- [x] `30-910` (6" Wheel) catalog bug fixed in WC/master — Box(1000) variant had no distinct SKU (shared `30-910` with the Each variant) and its price was below the Each price, backwards for a 1000-count box. Corrected to `30-910-E`/`30-910-B` with proper tier pricing (Wholesale/WL2/WL3 = 600× each-price, Commercial = 1.1×, Retail = 1.8× — this category's real multiplier, not the usual 2×).
+- [x] Print header fix (dev + prod) — `.print-hdr` (the "Price List — {tier/customer}" title) was coded but never actually visible in print output; no `@media print` rule set it to `display:block`. Also fixed a `:first-of-type` selector bug that would have forced the header onto its own blank first page once made visible (see `.print-hdr + .print-cat-section` in CSS).
+- [ ] Orange-row (no-catalog-SKU) items from the Florida Patio price list still pending: `PC-2xx`/`SP-2xx` powder coat/spray paint variant mapping (David has pack-weight formula, not yet applied), plus `04-203`, `V3-215`, `V3-218` individual review. Not blocking — these SKUs just aren't priced in PriceMatrix.
 - [ ] n8n ratio workflow: PAVCO (425) and A&K (483) only — no changes needed
-- [ ] Merge dev → main once Leisure pricing and customer PDF print fix are verified on dev
-- [x] `Customer_Specific_Pricing_with_Leisure.tsv` (417 rows) pasted into Google Sheets — dev UI confirmed reading correctly
 - [ ] Qty discount flag: flag breaks where higher-qty price < ~80-90% of qty=0 price (deferred until sentinel corrections done)
 - [ ] Patioproducts.com domain in Resend (SPF/DKIM) — eliminates Gmail warning on invite emails
-- [x] Dead code cleanup done: `_FlagsView_REMOVED`, dead `flagFilter` state removed
-- [x] Supabase dashboard link fixed in UserManagementModal
-- [x] Customer pricing flags added to CustomerView (`computeCustomerFlags`) — no-print, hover for details
-- [x] "Florida Patio" renamed to "Florida Patio / Alumatech" (customer 418)
-- [x] "variants" → "prices" in all UI count labels
-- [x] Customer pricing PDF now splits into per-category tables (matches Sheet View) — fixes columns being cut off past ~10+ on wide qty-break spreads; verified on dev
+- [x] Leisure Furniture (441): fabric-only SPECIFIC rows, no ratio workflow needed — complete
+- [x] Customer pricing PDF now splits into per-category tables (matches Sheet View) — fixes columns being cut off past ~10+ on wide qty-break spreads; verified on dev and prod
