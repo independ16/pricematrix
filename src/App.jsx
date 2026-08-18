@@ -862,6 +862,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
   .sheet{display:block!important;height:auto!important}
   .sheet-wrap,.cust-wrap{display:none!important}
   .print-only{display:block!important}
+  .print-hdr{display:block!important}
   .ptw,.msec{page-break-inside:avoid!important}
 }
 .print-only{display:none}
@@ -871,7 +872,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--fb);font-size:13px
 
 /* Per-category print sections */
 .print-cat-section{page-break-before:always;padding-bottom:16mm}
-.print-cat-section:first-of-type{page-break-before:avoid}
+.print-hdr + .print-cat-section{page-break-before:avoid}
 .print-cat-title{font-family:'Syne',sans-serif;font-weight:700;font-size:13pt;color:#1a2530;
   border-bottom:2px solid #3a7d58;padding-bottom:4px;margin-bottom:8px;margin-top:14px;
   text-transform:uppercase;letter-spacing:.05em}
