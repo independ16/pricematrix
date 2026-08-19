@@ -1948,7 +1948,9 @@ function CustomerView({ allData, caps }) {
       else if (hasRatio)     topSource = PRICE_SOURCE.RATIO;
       else if (hasWl3)       topSource = PRICE_SOURCE.WL3;
       if (topSource === null) return;
-      if (topSource === PRICE_SOURCE.WL3) {
+      // Florida Patio / Alumatech (418) wants these fabrics at plain WL3 pricing
+      // when there's no set price — exclusion still applies to everyone else.
+      if (topSource === PRICE_SOURCE.WL3 && String(custId) !== "418") {
         const nameLower = v.parent_name.toLowerCase();
         if (EXCLUDED_FABRIC_BRANDS.some(b => nameLower.includes(b))) return;
       }
